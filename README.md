@@ -1,2 +1,182 @@
-# Aurora-Client
-Aurora Client is a sleek, modern visual utility client built for Minecraft 1.21.11 on the Fabric mod loader. Created by terem90, it focuses on delivering a smooth, highly customizable interface and clean gameplay enhancements without sacrificing performance
+# Aurora Client
+
+Красивый визуальный клиент для **Minecraft 1.21.11** (Fabric): стеклянное меню
+с блюром, HUD-панели, зум, фуллбрайт и полная кастомизация темы.
+
+Сделан с упором на внешний вид: плавные анимации, скруглённые «стеклянные»
+панели, градиенты, кастомный шрифт Golos с полной кириллицей.
+
+---
+
+## Что внутри
+
+### Меню (открывается на **правый Shift**)
+- Стеклянные панели с блюром фона (нативный блюр Minecraft 1.21.11)
+- Категории: **Визуал · HUD · Чат · Тема**
+- Поиск по модулям, плавные анимации открытия, ховеры, слайдеры, пипетка цвета
+- ЛКМ по модулю — включить/выключить, ПКМ — его настройки
+- Вкладка **Тема**: акцентные цвета (8 пресетов + пипетка), радуга,
+  прозрачность панелей, сила блюра, анимации, шрифт, клавиша меню
+
+### Модули
+| Модуль | Что делает |
+| --- | --- |
+| Зум | Плавное приближение по клавише **C** (кратность и плавность настраиваются) |
+| Fullbright | Максимальная яркость ночью и в пещерах |
+| Без тряски камеры | Отключает покачивание при уроне |
+| Низкий огонь | Огонь на экране не закрывает обзор |
+| Чистый интерфейс | Скрытие хотбара, прицела, скорборда и др. |
+| Кастомный прицел | Точка / круг / крест, свой цвет |
+| Водяной знак | Логотип + FPS + пинг |
+| FPS / Пинг / Координаты / CPS / Часы / Сторона света | Инфо-панели |
+| Клавиши | Keystrokes: подсветка WASD, ЛКМ/ПКМ и CPS |
+| Улучшения чата | Без затухания сообщений, прозрачный фон, Ctrl+C копирует последнее |
+
+### HUD-редактор
+Кнопка **HUD-редактор** в меню: перетаскивай элементы мышью, колесо — масштаб,
+ПКМ по элементу — включить/выключить фон.
+
+### Главное меню
+Кастомное главное меню с живым градиентом, «северным сиянием», частицами
+и приветствием с твоим ником.
+
+---
+
+## Установка готового jar (самый простой путь)
+
+1. Поставь **Fabric Loader** для 1.21.11 (официальный установщик:
+   https://fabricmc.net/use/installer/)
+2. Скачай **Fabric API 0.141.6+1.21.11** (или новее для 1.21.11) с Modrinth
+   и положи в `.minecraft/mods`
+3. Положи `aurora-client-1.0.0.jar` в `.minecraft/mods`
+4. Запусти версию `fabric-loader-...-1.21.11`. Готово — нажми **правый Shift** в игре.
+
+## Сборка из исходников
+
+Нужен **JDK 21** (например, Eclipse Temurin: https://adoptium.net/).
+
+```bash
+# Windows: gradlew.bat build
+./gradlew build
+```
+
+Готовый jar появится в `build/libs/aurora-client-1.0.0.jar`.
+Первая сборка качает Minecraft и зависимости — это нормально, займет пару минут.
+
+### Разработка в IntelliJ IDEA
+1. Установи IntelliJ IDEA Community
+2. File → Open → выбери папку проекта
+3. Дождись индексации (при вопросе о JDK — выбери/скачай JDK 21)
+4. Запуск игры прямо из IDE: справа в Gradle-панели
+   `Tasks → fabric-loom → runClient`
+   (или создай Run Configuration «Minecraft Client»)
+
+---
+
+## Управление
+
+| Клавиша | Действие |
+| --- | --- |
+| **Правый Shift** | Открыть/закрыть меню (переназначается во вкладке «Тема») |
+| **C** | Зум (удерживать; клавиша меняется в настройках модуля) |
+| **Ctrl+C** в чате | Скопировать последнее сообщение |
+| ESC | Закрыть меню / выйти из захвата бинда |
+
+---
+
+## Как добавить свой модуль
+
+1. Создай класс в `src/client/java/dev/aurora/client/module/modules/`:
+
+```java
+package dev.aurora.client.module.modules;
+
+import dev.aurora.client.module.Category;
+import dev.aurora.client.module.Module;
+import dev.aurora.client.module.settings.BooleanSetting;
+import net.minecraft.client.Minecraft;
+
+public class AutoJumpModule extends Module {
+    private final BooleanSetting strong = new BooleanSetting("Сильно", false);
+
+    public AutoJumpModule() {
+        super("Автопрыжок", "Прыгает автоматически", Category.VISUAL); // категория вкладки
+        addSettings(strong); // настройки появятся в меню сами
+    }
+
+    @Override
+    public void onTick() { // вызывается каждый тик, пока модуль включён
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.player != null && mc.player.onGround()) {
+            mc.player.jumpFromGround();
+        }
+    }
+}
+```
+
+2. Зарегистрируй его в `ModuleManager.init()`:
+```java
+register(new AutoJumpModule());
+```
+
+3. Готово: модуль появится в меню, с биндами, настройками и сохранением в конфиг.
+
+### Свой HUD-элемент
+Наследуй `HudModule` вместо `Module` — получишь позицию, масштаб, фон и
+поддержку редактора HUD. Примеры: `WatermarkHud`, `KeystrokesHud`.
+
+---
+
+## Структура проекта
+
+```
+src/client/java/dev/aurora/client/
+├── AuroraClient.java        — точка входа, регистрация событий и HUD
+├── config/AuroraConfig.java — сохранение/загрузка config/aurora.json
+├── theme/Theme.java         — цвета, блюр, шрифт, анимации
+├── util/                    — отрисовка (RenderUtil), анимации, CPS-трекер
+├── module/
+│   ├── Module.java          — базовый класс модуля
+│   ├── ModuleManager.java   — реестр всех модулей
+│   ├── settings/            — типы настроек (bool, слайдер, цвет, бинд...)
+│   └── modules/             — сами модули
+├── hud/                     — HUD-элементы + редактор HUD
+├── gui/
+│   ├── AuroraClickGui.java  — главное меню клиента
+│   └── AuroraTitleScreen.java — красивое главное меню игры
+└── mixin/                   — миксины (зум, огонь, чат, CPS)
+```
+
+---
+
+## Частые вопросы
+
+**Сборка падает с «invalid source release» / «Java version»**
+— нужен именно JDK 21 (не 17 и не 8). Проверь `java -version`.
+
+**Сборка падает на скачивании зависимостей**
+— проект уже настроен на зеркало Aliyun (см. `settings.gradle`), но можно
+вернуть обычный Maven Central, удалив блок с зеркалом.
+
+**Меню не открывается**
+— правый Shift работает только **в мире** (не в главном меню). Из главного
+меню настройки клиента — кнопка «Настройки Aurora».
+
+**Это читерский клиент?**
+— Нет. Все модули — визуальные и «качества жизни» (HUD, зум, яркость, чат).
+Они не вмешиваются в боевую механику. Такие моды обычно разрешены правилами
+серверов, но перед игрой на HolyWorld / ReallyWorld / Funtime всё же проверь
+правила конкретного сервера про моды — у всех свои списки разрешённого.
+
+**Можно ли играть на серверах?**
+— Да, это обычный Fabric-мод: заходи на любой сервер версии 1.21.11.
+
+---
+
+## Технические детали
+
+- Minecraft **1.21.11**, Fabric Loader **0.20.1**, Fabric API **0.141.6+1.21.11**
+- Loom **1.17.21**, Gradle **9.8.2**, Java **21**, официальные Mojang-маппинги
+- Клиент полностью на русском, шрифт Golos Text (SIL Open Font License)
+- Лицензия кода: GNU GPL V3.0
+
