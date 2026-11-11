@@ -1,0 +1,58 @@
+plugins {
+        id 'fabric-loom' version "${loom_version}"
+}
+
+repositories {
+        // Зеркало Maven Central для стабильной загрузки зависимостей
+        maven {
+                name = 'AliyunMirror'
+                url = 'https://maven.aliyun.com/repository/public'
+        }
+        mavenCentral()
+        // Loom сам подключает репозитории Minecraft и Fabric.
+}
+
+loom {
+        splitEnvironmentSourceSets()
+
+        mods {
+                "aurora" {
+                        sourceSet sourceSets.main
+                        sourceSet sourceSets.client
+                }
+        }
+}
+
+dependencies {
+        minecraft "com.mojang:minecraft:${project.minecraft_version}"
+        mappings loom.officialMojangMappings()
+        modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+
+        // Fabric API — обязательная зависимость
+        modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+}
+
+processResources {
+        def version = project.version
+        inputs.property "version", version
+
+        filesMatching("fabric.mod.json") {
+                expand "version": version
+        }
+}
+
+tasks.withType(JavaCompile).configureEach {
+        it.options.release = 21
+        it.options.encoding = "UTF-8"
+}
+
+java {
+        sourceCompatibility = JavaVersion.VERSION_21
+        targetCompatibility = JavaVersion.VERSION_21
+}
+
+jar {
+        from("LICENSE") {
+                rename { "${it}_${project.base.archivesName.get()}" }
+        }
+}

@@ -1,0 +1,17 @@
+pluginManagement {
+	repositories {
+		maven {
+			name = 'Fabric'
+			url = 'https://maven.fabricmc.net/'
+		}
+		// Зеркало Maven Central (на случай ограничений скорости основного)
+		maven {
+			name = 'AliyunMirror'
+			url = 'https://maven.aliyun.com/repository/public'
+		}
+		mavenCentral()
+		gradlePluginPortal()
+	}
+}
+
+rootProject.name = 'aurora-client'
