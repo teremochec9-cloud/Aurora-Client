@@ -1,0 +1,17 @@
+{
+	"required": true,
+	"package": "dev.aurora.client.mixin",
+	"compatibilityLevel": "JAVA_21",
+	"minVersion": "0.8",
+	"client": [
+		"GameRendererMixin",
+		"ScreenEffectRendererMixin",
+		"MouseHandlerMixin",
+		"ChatComponentMixin",
+		"ChatScreenMixin",
+		"ChatComponentAccessor"
+	],
+	"injectors": {
+		"defaultRequire": 1
+	}
+}

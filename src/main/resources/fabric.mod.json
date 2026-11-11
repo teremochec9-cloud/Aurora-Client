@@ -1,0 +1,31 @@
+{
+	"schemaVersion": 1,
+	"id": "aurora",
+	"version": "${version}",
+	"name": "Aurora Client",
+	"description": "Красивый визуальный клиент для Minecraft 1.21.11: стеклянное меню с блюром, HUD-панели, зум, фуллбрайт и кастомизация темы.",
+	"authors": [
+		"terem90"
+	],
+	"contact": {},
+	"license": "MIT",
+	"icon": "assets/aurora/icon.png",
+	"environment": "client",
+	"entrypoints": {
+		"client": [
+			"dev.aurora.client.AuroraClient"
+		]
+	},
+	"mixins": [
+		{
+			"config": "aurora.mixins.json",
+			"environment": "client"
+		}
+	],
+	"depends": {
+		"fabricloader": ">=0.20.1",
+		"minecraft": "~1.21.11",
+		"java": ">=21",
+		"fabric-api": "*"
+	}
+}
