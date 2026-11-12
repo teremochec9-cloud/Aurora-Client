@@ -20,7 +20,10 @@ public class CpsHud extends HudModule {
     @Override
     public int width() {
         Minecraft mc = Minecraft.getInstance();
-        return RenderUtil.width(mc.font, "CPS: 00", theme()) + 10;
+        // из кэша: трёхзначный CPS шире запасного "00" и вылезал за капсулу
+        String cpsStr = cached("cps", 250, () -> String.valueOf(ClickTracker.leftCps() + ClickTracker.rightCps()));
+        return RenderUtil.width(mc.font, "CPS: ", theme())
+                + RenderUtil.width(mc.font, cpsStr, theme()) + 10;
     }
 
     @Override

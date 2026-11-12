@@ -20,6 +20,8 @@ loom {
                         client()
                         // размер окна для локальных тестов/скриншотов
                         programArgs "--width", "1280", "--height", "800"
+                        // ограничиваем кучу игры, чтобы песочница не уходила в OOM
+                        vmArgs "-Xms256m", "-Xmx768m", "-XX:MaxMetaspaceSize=320m"
                 }
         }
 

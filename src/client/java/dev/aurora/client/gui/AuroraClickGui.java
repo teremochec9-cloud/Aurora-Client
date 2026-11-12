@@ -12,6 +12,7 @@ import dev.aurora.client.module.settings.ColorSetting;
 import dev.aurora.client.module.settings.ModeSetting;
 import dev.aurora.client.module.settings.NumberSetting;
 import dev.aurora.client.module.settings.Setting;
+import dev.aurora.client.profile.ProfileManager;
 import dev.aurora.client.theme.Theme;
 import dev.aurora.client.util.Animation;
 import dev.aurora.client.util.ColorUtil;
@@ -19,7 +20,6 @@ import dev.aurora.client.util.GfxEngine;
 import dev.aurora.client.util.RenderUtil;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
-import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.input.KeyEvent;
 import net.minecraft.client.input.MouseButtonEvent;
@@ -36,36 +36,63 @@ import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 /**
- * ClickGUI Aurora: единое стеклянное окно (радиус 12) с боковой панелью,
- * карточками модулей в две колонки (радиус 8), pill-тумблерами, плавными
- * слайдерами, поиском и кнопкой HUD-редактора.
+ * ClickGUI Aurora: тёмное окно (радиус 12) с боковой панелью-полосой и
+ * разделителем, карточками модулей в две колонки (имя / статус / описание,
+ * pill-тумблер справа), тегами включённых модулей в шапке, поиском с
+ * иконкой-лупой и кнопкой HUD-редактора.
+ *
+ * <p>Компоновка выровнена по референсу (ровная сетка карточек, теги в шапке,
+ * статус «Включен/Выключен»), но сохраняет айдентику Aurora: акцентный
+ * градиент, стекло и анимации.</p>
  *
  * <p>Отрисовка разбита на слои (strata): сначала все формы SDF-движка,
  * затем текст — поэтому панели никогда не перекрывают подписи, а
  * ванильный блюр фона выполняется ровно один раз за кадр.</p>
  */
 public class AuroraClickGui extends Screen {
-    private static final int WIN_W = 580;
-    private static final int WIN_H = 340;
+    private static final int WIN_W = 660;
+    private static final int WIN_H = 384;
     private static final int WIN_R = 12;
-    private static final int SIDEBAR_W = 138;
-    private static final int GAP = 8;
-    private static final int CARD_R = 8;
+    private static final int SIDEBAR_W = 148;
+    private static final int GAP = 10;
+    private static final int CARD_R = 10;
     private static final int SEARCH_W = 150;
+    /** Высота шапки тела: заголовок + теги + поиск. */
+    private static final int HEADER_H = 36;
 
     private final Theme theme;
     /** Экран, на который возвращаемся при закрытии (например, главное меню). */
     private final Screen parent;
     private final Animation openAnim = new Animation(0, 13);
     private final Animation tabAnim = new Animation(0, 12);
+    private final Animation dialogAnim = new Animation(0, 15);
+    /** Живой скроллбар: подсветка ползунка при активности/наведении на тело. */
+    private final Animation scrollAnim = new Animation(0, 9);
     private final Map<Module, Animation> hoverAnims = new HashMap<>();
     private final Map<Module, Animation> toggleAnims = new HashMap<>();
     private final Map<Module, Animation> expandAnims = new HashMap<>();
     private final Map<Module, Boolean> expanded = new HashMap<>();
+    /** Плавные тумблеры настроек: анимация каждой строки-переключателя. */
+    private final Map<Object, Animation> settingAnims = new HashMap<>();
+    /** Наведение на слайдеры (отдельная карта — ключи те же объекты настроек). */
+    private final Map<Object, Animation> sliderHoverAnims = new HashMap<>();
+    /** Кэш переносов описаний модулей (пересчитывается только при смене ширины). */
+    private final Map<Module, List<String>> descCache = new HashMap<>();
+    private int descCacheKey = -1;
+    /** Скользящий индикатор активной категории (позиция относительно верха сайдбара). */
+    private final Animation sideIndicator = new Animation(0, 16);
+    /** Штамп каскадного появления карточек: карточки раскрываются по очереди. */
+    private long revealStamp = System.currentTimeMillis();
+    /** Прошлое значение поиска — для перезапуска каскада при смене результатов. */
+    private String lastSearchValue = "";
 
     private Category tab = Category.VISUAL;
     private boolean themeTab = false;
-    private EditBox search;
+    private AuroraTextField search;
+    private AuroraTextField nickField;
+    private boolean profileOpen;
+    private String profileError;
+    private long profileErrorTime;
     private float scrollTarget = 0;
     private float scrollPos = 0;
     private boolean closing = false;
@@ -111,15 +138,17 @@ public class AuroraClickGui extends Screen {
     /** Карточка модуля: геометрия и два прохода отрисовки. */
     private static final class Card {
         final Module module;
+        final int idx;
         final int x, y, w, h;
         final int headerH;
         final List<Row> rows;
         final Runnable shapes;
         final Runnable texts;
 
-        Card(Module module, int x, int y, int w, int h, int headerH, List<Row> rows,
+        Card(Module module, int idx, int x, int y, int w, int h, int headerH, List<Row> rows,
              Runnable shapes, Runnable texts) {
             this.module = module;
+            this.idx = idx;
             this.x = x;
             this.y = y;
             this.w = w;
@@ -163,14 +192,21 @@ public class AuroraClickGui extends Screen {
 
     @Override
     protected void init() {
-        search = new EditBox(this.font, 0, 0, SEARCH_W - 20, 16, Component.literal("Поиск"));
+        search = new AuroraTextField(this.font, 0, 0, SEARCH_W - 30, 16, Component.literal("Поиск"));
         search.setMaxLength(40);
         search.setBordered(false);
-        // только как обработчик ввода: текст поля рисует наш движок в стекле.
-        // Рисовать сам EditBox нельзя — ванильный текст дублирует наш и
-        // «налезает» на него при масштабе окна != 1
-        search.setVisible(false);
+        // Ванильную отрисовку EditBox не вызываем: renderWidget() у
+        // AuroraTextField — заглушка, текст/каретку/выделение рисует наш
+        // движок из состояния виджета. visible оставляем true:
+        // EditBox.charTyped требует isActive() = visible && active — при
+        // setVisible(false) каждый символ молча отбрасывался (исчезал ввод)
         addWidget(search);
+
+        nickField = new AuroraTextField(this.font, 0, 0, PROFILE_W - 48, 16, Component.literal("Никнейм"));
+        nickField.setMaxLength(16);
+        nickField.setBordered(false);
+        addWidget(nickField);
+
         setFocused(search);
         // повышаем силу блюра на время, пока меню открыто
         try {
@@ -191,6 +227,8 @@ public class AuroraClickGui extends Screen {
     public void tick() {
         openAnim.update();
         tabAnim.update();
+        dialogAnim.update();
+        scrollAnim.update();
         for (Animation a : hoverAnims.values()) {
             a.update();
         }
@@ -198,6 +236,9 @@ public class AuroraClickGui extends Screen {
             a.update();
         }
         for (Animation a : expandAnims.values()) {
+            a.update();
+        }
+        for (Animation a : settingAnims.values()) {
             a.update();
         }
         scrollPos += (scrollTarget - scrollPos) * 0.35f;
@@ -239,6 +280,15 @@ public class AuroraClickGui extends Screen {
         cards.clear();
         themeRows.clear();
 
+        // перезапуск каскада при смене поискового запроса
+        if (search != null) {
+            String v = search.getValue();
+            if (!v.equals(lastSearchValue)) {
+                lastSearchValue = v;
+                resetReveal();
+            }
+        }
+
         // масштаб: вписываем окно в экран + анимация открытия
         float fit = fitScale();
         float scale = fit * (theme.animations ? 0.95f + 0.05f * Animation.easeOutQuint(t) : 1.0f);
@@ -250,17 +300,23 @@ public class AuroraClickGui extends Screen {
 
         int winX = (this.width - WIN_W) / 2;
         int winY = (this.height - WIN_H) / 2;
+        // мягкий «выезд» окна снизу вверх при открытии/закрытии
+        int winYAnim = winY - (int) ((1f - Animation.easeOutQuint(t)) * 12);
 
         // ===== геометрия тела =====
-        bodyX = winX + SIDEBAR_W + 4;
-        bodyY = winY + 8;
+        bodyX = winX + SIDEBAR_W + 10;
+        bodyY = winYAnim + 8;
         bodyW = winX + WIN_W - 10 - bodyX;
         bodyH = WIN_H - 16;
 
         // строка поиска следует за окном при масштабе
         if (search != null) {
-            search.setPosition(searchFieldX() + 10, bodyY + 8);
-            search.setWidth(SEARCH_W - 20);
+            search.setPosition(searchFieldX() + 24, bodyY + 10);
+            search.setWidth(SEARCH_W - 30);
+        }
+        if (nickField != null) {
+            nickField.setPosition(profileFieldX(winX) + 8, profileFieldY(winY) + 4);
+            nickField.setWidth(PROFILE_W - 48);
         }
 
         // масштаб вписывания применяем всегда — даже при выключенных анимациях.
@@ -272,20 +328,20 @@ public class AuroraClickGui extends Screen {
         g.pose().translate(-cx, -cy);
 
         // ===== фаза 1: формы =====
-        drawWindowShapes(g, winX, winY, t);
-        drawSidebarShapes(g, winX, winY, t);
+        drawWindowShapes(g, winX, winYAnim, t);
+        drawSidebarShapes(g, winX, winYAnim, t);
         drawHeaderShapes(g, t);
-        layoutContent(g, winX, winY);
+        layoutContent(g, winX, winYAnim);
         drawBodyShapes(g);
-        drawFooterShapes(g, winX, winY);
+        drawProfileDialogShapes(g, winX, winYAnim);
 
         g.nextStratum();
 
         // ===== фаза 2: текст =====
-        drawSidebarText(g, winX, winY, t);
+        drawSidebarText(g, winX, winYAnim, t);
         drawHeaderText(g);
         drawBodyTexts(g);
-        drawFooterTexts(g, winX, winY);
+        drawProfileDialogTexts(g, winX, winYAnim);
 
         g.pose().popMatrix();
 
@@ -310,14 +366,18 @@ public class AuroraClickGui extends Screen {
         if (alpha < 4) {
             return;
         }
+        float k = alpha / 255f;
         GfxEngine.dropShadow(g, winX, winY, WIN_W, WIN_H, WIN_R, 5f, 9f,
-                ColorUtil.rgba(0, 0, 0, (int) (120 * t)));
-        GfxEngine.rounded(g, winX, winY, WIN_W, WIN_H, WIN_R,
-                ColorUtil.alpha(theme.panelColor(), (int) (alpha * 0.92f + 20)));
-        GfxEngine.outline(g, winX, winY, WIN_W, WIN_H, WIN_R, ColorUtil.rgba(255, 255, 255, (int) (26 * t)), 1f);
-        // блик по верхней кромке
+                ColorUtil.rgba(0, 0, 0, (int) (150 * t)));
+        // почти непрозрачная тёмная база (референс) + лёгкий стеклянный блик
+        int baseA = (int) ((195 + 60 * theme.backgroundAlpha) * k);
+        GfxEngine.rounded(g, winX, winY, WIN_W, WIN_H, WIN_R, ColorUtil.rgba(10, 11, 17, baseA));
+        GfxEngine.roundedGradient(g, winX, winY, WIN_W, WIN_H, WIN_R,
+                ColorUtil.rgba(255, 255, 255, (int) (10 * k)), ColorUtil.rgba(255, 255, 255, (int) (2 * k)));
+        GfxEngine.outline(g, winX, winY, WIN_W, WIN_H, WIN_R, ColorUtil.rgba(255, 255, 255, (int) (26 * k)), 1f);
+        // мягкий блик по верхней кромке
         GfxEngine.rounded(g, winX + WIN_R + 4, winY + 1, WIN_W - (WIN_R + 4) * 2, 1, 0.5f,
-                ColorUtil.rgba(255, 255, 255, (int) (24 * t)));
+                ColorUtil.rgba(255, 255, 255, (int) (36 * k)));
     }
 
     /* ------------------------------------------------------------------ */
@@ -325,33 +385,49 @@ public class AuroraClickGui extends Screen {
     /* ------------------------------------------------------------------ */
 
     private void drawSidebarShapes(GuiGraphics g, int winX, int winY, float t) {
-        int sx = winX + 8;
-        int sy = winY + 8;
-        int sw = SIDEBAR_W - 20;
-        int sh = WIN_H - 16;
+        int alpha = (int) (255 * Animation.smooth(t));
+        if (alpha < 4) {
+            return;
+        }
+        float kf = alpha / 255f;
+        int sx = winX;
+        int sy = winY;
+        int sw = SIDEBAR_W;
+        int sh = WIN_H;
 
-        GfxEngine.rounded(g, sx, sy, sw, sh, 10, ColorUtil.rgba(255, 255, 255, (int) (7 * t)));
-        GfxEngine.outline(g, sx, sy, sw, sh, 10, ColorUtil.rgba(255, 255, 255, (int) (14 * t)), 1f);
+        // тёмная полоса сайдбара + вертикальный разделитель (как на референсе)
+        GfxEngine.rounded(g, sx, sy, sw, sh, WIN_R, ColorUtil.rgba(0, 0, 0, (int) (85 * kf)));
+        GfxEngine.rounded(g, sx + sw - 1, sy + 12, 1, sh - 24, 0.5f,
+                ColorUtil.rgba(255, 255, 255, (int) (18 * kf)));
 
         // версии-чип у логотипа
         int logoW = RenderUtil.width(font, Theme.CLIENT_NAME, theme);
         int chipW = RenderUtil.width(font, Theme.CLIENT_VERSION, theme) + 10;
-        GfxEngine.rounded(g, sx + 12 + logoW + 6, sy + 11, chipW, 12, 6,
-                ColorUtil.alpha(theme.accentNow(), (int) (110 * t)));
+        GfxEngine.rounded(g, sx + 14 + logoW + 6, sy + 11, chipW, 12, 6,
+                ColorUtil.alpha(theme.accentNow(), (int) (100 * kf)));
+
+        // ===== скользящий индикатор активной категории =====
+        // позиции: категории с 46-й строки с шагом 30; «Тема» — сразу после них
+        int activeIdx = themeTab ? Category.values().length : tab.ordinal();
+        int indicatorTarget = 46 + activeIdx * 30 + (themeTab ? 2 : 0);
+        float indY = sy + sideIndicator.apply(indicatorTarget);
+        GfxEngine.rounded(g, sx + 8, indY, sw - 18, 26, 8,
+                ColorUtil.alpha(theme.accentNow(), (int) (34 * kf)));
+        GfxEngine.outline(g, sx + 8, indY, sw - 18, 26, 8,
+                ColorUtil.alpha(theme.accentNow(), (int) (55 * kf)), 1f);
+        GfxEngine.rounded(g, sx + 12, indY + 6, 2, 14, 1,
+                ColorUtil.alpha(theme.accentNow(), 220));
 
         // ===== категории =====
-        int cy = sy + 40;
+        int cy = sy + 46;
         for (Category cat : Category.values()) {
             boolean active = !themeTab && tab == cat;
-            boolean hover = mouseX >= sx + 4 && mouseX < sx + sw - 4 && mouseY >= cy && mouseY < cy + 22;
-            if (active) {
-                GfxEngine.rounded(g, sx + 4, cy, sw - 8, 22, 8, ColorUtil.alpha(theme.accentNow(), (int) (40 * t)));
-                GfxEngine.rounded(g, sx + 4, cy + 4, 3, 14, 1.5f, theme.accentNow());
-            } else if (hover) {
-                GfxEngine.rounded(g, sx + 4, cy, sw - 8, 22, 8, ColorUtil.rgba(255, 255, 255, (int) (12 * t)));
+            boolean hover = mouseX >= sx + 8 && mouseX < sx + sw - 10 && mouseY >= cy && mouseY < cy + 26;
+            if (hover) {
+                GfxEngine.rounded(g, sx + 8, cy, sw - 18, 26, 8, ColorUtil.rgba(255, 255, 255, (int) (10 * kf)));
             }
-            drawCategoryIcon(g, cat, sx + 14, cy + 5, active);
-            hits.add(new Hit(sx + 4, cy, sw - 8, 22, -1, () -> {
+            drawCategoryIcon(g, cat, sx + 18, cy + 7, active);
+            hits.add(new Hit(sx + 8, cy, sw - 18, 26, -1, () -> {
                 playClick();
                 themeTab = false;
                 tab = cat;
@@ -363,25 +439,22 @@ public class AuroraClickGui extends Screen {
                 scrollTarget = 0;
                 tabAnim.snap(0);
                 tabAnim.to(1);
+                resetReveal();
             }));
-            cy += 26;
+            cy += 30;
         }
 
         // ===== «Тема» =====
-        int themeY = cy + 4;
-        boolean themeActive = themeTab;
-        boolean themeHover = mouseX >= sx + 4 && mouseX < sx + sw - 4 && mouseY >= themeY && mouseY < themeY + 22;
-        if (themeActive) {
-            GfxEngine.rounded(g, sx + 4, themeY, sw - 8, 22, 8, ColorUtil.alpha(theme.accentNow(), (int) (40 * t)));
-            GfxEngine.rounded(g, sx + 4, themeY + 4, 3, 14, 1.5f, theme.accentNow());
-        } else if (themeHover) {
-            GfxEngine.rounded(g, sx + 4, themeY, sw - 8, 22, 8, ColorUtil.rgba(255, 255, 255, (int) (12 * t)));
+        int themeY = cy + 2;
+        boolean themeHover = mouseX >= sx + 8 && mouseX < sx + sw - 10 && mouseY >= themeY && mouseY < themeY + 26;
+        if (themeHover) {
+            GfxEngine.rounded(g, sx + 8, themeY, sw - 18, 26, 8, ColorUtil.rgba(255, 255, 255, (int) (10 * kf)));
         }
         // иконка «палитра» — три кружка
-        GfxEngine.circle(g, sx + 18, themeY + 9, 5, theme.accentNow());
-        GfxEngine.circle(g, sx + 24, themeY + 13, 4, theme.accent(1.0f));
-        GfxEngine.circle(g, sx + 14, themeY + 14, 3, ColorUtil.rgba(255, 255, 255, 120));
-        hits.add(new Hit(sx + 4, themeY, sw - 8, 22, -1, () -> {
+        GfxEngine.circle(g, sx + 22, themeY + 11, 10, theme.accentNow());
+        GfxEngine.circle(g, sx + 27, themeY + 15, 8, theme.accent(1.0f));
+        GfxEngine.circle(g, sx + 18, themeY + 16, 6, ColorUtil.rgba(255, 255, 255, 120));
+        hits.add(new Hit(sx + 8, themeY, sw - 18, 26, -1, () -> {
             playClick();
             themeTab = true;
             if (search != null) {
@@ -390,89 +463,70 @@ public class AuroraClickGui extends Screen {
             scrollTarget = 0;
             tabAnim.snap(0);
             tabAnim.to(1);
+            resetReveal();
         }));
 
-        // ===== цветовая схема: 2 ряда по 4 — всё строго внутри панели =====
-        int palY = themeY + 36;
-        for (int i = 0; i < Theme.PRESETS.length; i++) {
-            String[] preset = Theme.PRESETS[i];
-            int px = sx + 14 + (i % 4) * 24;
-            int py = palY + (i / 4) * 20;
-            int c1 = (int) (0xFF000000L | Long.parseLong(preset[1], 16));
-            boolean isActive = theme.accent == c1 && !theme.rainbow;
-            boolean hoverP = mouseX >= px - 4 && mouseX < px + 14 && mouseY >= py - 4 && mouseY < py + 14;
-            if (hoverP) {
-                GfxEngine.circle(g, px + 5, py + 5, 18, ColorUtil.rgba(255, 255, 255, 30));
-            }
-            GfxEngine.circle(g, px + 5, py + 5, 10, c1);
-            if (isActive) {
-                GfxEngine.ring(g, px + 5, py + 5, 15, ColorUtil.rgb(255, 255, 255), 1.2f);
-            }
-            final int f1 = c1;
-            final int f2 = (int) (0xFF000000L | Long.parseLong(preset[2], 16));
-            hits.add(new Hit(px - 4, py - 4, 18, 18, 0, () -> {
-                theme.accent = f1;
-                theme.accent2 = f2;
-                theme.rainbow = false;
-                playClick();
-                AuroraConfig.save();
-            }));
+        // ===== профиль (клик — смена никнейма) =====
+        int profY = sy + sh - 56;
+        GfxEngine.rounded(g, sx + 8, profY, sw - 16, 42, 10, ColorUtil.rgba(255, 255, 255, (int) (8 * kf)));
+        GfxEngine.outline(g, sx + 8, profY, sw - 16, 42, 10, ColorUtil.rgba(255, 255, 255, (int) (16 * kf)), 1f);
+        // аватар: акцентный круг с инициалом
+        int avX = sx + 24;
+        int avY = profY + 21;
+        GfxEngine.circle(g, avX, avY, 24, theme.accentNow());
+        GfxEngine.circle(g, avX, avY, 19, ColorUtil.lerp(theme.accentNow(), ColorUtil.rgb(14, 15, 23), 0.45f));
+        boolean profHover = mouseX >= sx + 8 && mouseX < sx + sw - 8 && mouseY >= profY && mouseY < profY + 42;
+        if (profHover) {
+            GfxEngine.rounded(g, sx + 8, profY, sw - 16, 42, 10, ColorUtil.rgba(255, 255, 255, (int) (12 * kf)));
         }
-
-        // ===== профиль =====
-        int profY = sy + sh - 42;
-        GfxEngine.rounded(g, sx + 4, profY, sw - 8, 34, 9, ColorUtil.rgba(255, 255, 255, (int) (10 * t)));
-        GfxEngine.outline(g, sx + 4, profY, sw - 8, 34, 9, ColorUtil.rgba(255, 255, 255, (int) (16 * t)), 1f);
-        String nick = Minecraft.getInstance().getUser().getName();
-        int avD = 20;
-        int avX = sx + 14;
-        int avY = profY + 17;
-        GfxEngine.circle(g, avX, avY, avD, theme.accentNow());
-        GfxEngine.circle(g, avX, avY, avD - 6, ColorUtil.lerp(theme.accentNow(), ColorUtil.rgb(17, 18, 27), 0.35f));
+        // статусная точка справа (индикатор на референсе)
+        GfxEngine.circle(g, sx + sw - 20, profY + 21, 6, theme.accentNow());
+        hits.add(new Hit(sx + 8, profY, sw - 16, 42, 0, this::openProfileDialog));
     }
 
     private void drawSidebarText(GuiGraphics g, int winX, int winY, float t) {
-        int sx = winX + 8;
-        int sy = winY + 8;
-        int sw = SIDEBAR_W - 20;
+        float kf = Animation.smooth(t);
+        int sx = winX;
+        int sy = winY;
+        int sw = SIDEBAR_W;
 
         // логотип
-        RenderUtil.drawGlowText(g, font, Theme.CLIENT_NAME, sx + 12, sy + 11,
-                theme.textPrimary(), ColorUtil.alpha(theme.accentNow(), (int) (36 * t)), theme);
+        RenderUtil.drawGlowText(g, font, Theme.CLIENT_NAME, sx + 14, sy + 11,
+                theme.textPrimary(), ColorUtil.alpha(theme.accentNow(), (int) (36 * kf)), theme);
         int logoW = RenderUtil.width(font, Theme.CLIENT_NAME, theme);
         int chipW = RenderUtil.width(font, Theme.CLIENT_VERSION, theme) + 10;
-        RenderUtil.drawText(g, font, Theme.CLIENT_VERSION, sx + 12 + logoW + 11, sy + 14, ColorUtil.rgb(255, 255, 255), theme);
-        RenderUtil.drawText(g, font, "клиент для MC " + Theme.MC_VERSION, sx + 12, sy + 26,
+        RenderUtil.drawText(g, font, Theme.CLIENT_VERSION, sx + 14 + logoW + 11, sy + 14, ColorUtil.rgb(255, 255, 255), theme);
+        RenderUtil.drawText(g, font, "клиент для MC " + Theme.MC_VERSION, sx + 14, sy + 26,
                 ColorUtil.alpha(theme.textSecondary(), 150), theme);
 
         // категории
-        int cy = sy + 40;
+        int cy = sy + 46;
         for (Category cat : Category.values()) {
             boolean active = !themeTab && tab == cat;
-            RenderUtil.drawText(g, font, cat.title, sx + 32, cy + 8,
-                    active ? ColorUtil.rgb(255, 255, 255) : theme.textSecondary(), theme);
-            cy += 26;
+            RenderUtil.drawText(g, font, cat.title, sx + 38, cy + 9,
+                    active ? theme.accentNow() : theme.textSecondary(), theme);
+            cy += 30;
         }
 
         // «Тема»
-        RenderUtil.drawText(g, font, "Тема", sx + 32, cy + 4 + 8,
-                themeTab ? ColorUtil.rgb(255, 255, 255) : theme.textSecondary(), theme);
-
-        // подпись схемы
-        RenderUtil.drawText(g, font, "Цветовая схема", sx + 12, cy + 38 - 8, theme.textSecondary(), theme);
+        RenderUtil.drawText(g, font, "Тема", sx + 38, cy + 2 + 9,
+                themeTab ? theme.accentNow() : theme.textSecondary(), theme);
 
         // профиль
-        int profY = sy + (WIN_H - 16) - 42;
-        String nick = Minecraft.getInstance().getUser().getName();
+        int profY = sy + WIN_H - 56;
+        String nick = ProfileManager.currentName();
         String initial = nick.isEmpty() ? "A" : nick.substring(0, 1).toUpperCase();
-        RenderUtil.drawCenteredText(g, font, initial, sx + 14, profY + 13, ColorUtil.rgb(255, 255, 255), theme);
-        RenderUtil.drawText(g, font, RenderUtil.ellipsize(font, nick, sw - 52, theme), sx + 30, profY + 8, theme.textPrimary(), theme);
-        RenderUtil.drawText(g, font, "Профиль", sx + 30, profY + 19, theme.textSecondary(), theme);
+        RenderUtil.drawCenteredText(g, font, initial, sx + 24, profY + 16, ColorUtil.rgb(255, 255, 255), theme);
+        RenderUtil.drawText(g, font, RenderUtil.ellipsize(font, nick, sw - 64, theme), sx + 42, profY + 12, theme.textPrimary(), theme);
+        // вторая строка короче и с гарантированной обрезкой — раньше
+        // «Профиль · сменить» не влезала в чип и резалась правым краем
+        RenderUtil.drawText(g, font, RenderUtil.ellipsize(font, "Сменить профиль", sw - 64, theme),
+                sx + 42, profY + 24, theme.textSecondary(), theme);
     }
 
     /** Минималистичные геометрические иконки категорий 12x12. */
     private void drawCategoryIcon(GuiGraphics g, Category cat, float x, float y, boolean active) {
-        int color = active ? ColorUtil.rgb(255, 255, 255) : theme.textSecondary();
+        int color = active ? theme.accentNow() : theme.textSecondary();
         switch (cat) {
             case VISUAL -> {
                 // «глаз»: линза + зрачок
@@ -505,50 +559,139 @@ public class AuroraClickGui extends Screen {
     }
 
     private int searchFieldX() {
-        return bodyX + bodyW - hudButtonW() - 8 - SEARCH_W;
+        return bodyX + bodyW - SEARCH_W;
+    }
+
+    private int hudButtonX() {
+        return searchFieldX() - 8 - hudButtonW();
+    }
+
+    /** Заголовок шапки. */
+    private String headerTitle() {
+        if (themeTab) {
+            return "Тема";
+        }
+        if (search != null && !search.getValue().trim().isEmpty()) {
+            return "Поиск";
+        }
+        return tab.title;
+    }
+
+    /** Теги шапки: имена включённых модулей категории (как aura/antibot на референсе). */
+    private List<String> headerTags() {
+        List<String> out = new ArrayList<>();
+        if (themeTab || (search != null && !search.getValue().trim().isEmpty())) {
+            return out;
+        }
+        for (Module m : ModuleManager.byCategory(tab)) {
+            if (m.isEnabled()) {
+                out.add(m.name);
+                if (out.size() == 4) {
+                    break;
+                }
+            }
+        }
+        return out;
     }
 
     private void drawHeaderShapes(GuiGraphics g, float t) {
+        int alpha = (int) (255 * Animation.smooth(t));
+        if (alpha < 4) {
+            return;
+        }
+        float k = alpha / 255f;
+
+        // теги включённых модулей рядом с заголовком (каскадное появление)
+        int tx = bodyX + 2 + RenderUtil.widthBold(font, headerTitle(), theme) + 10;
+        int tagIdx = 0;
+        for (String tag : headerTags()) {
+            int tw = RenderUtil.width(font, tag, theme) + 14;
+            if (tx + tw > hudButtonX() - 10) {
+                break;
+            }
+            float rt = tagReveal(tagIdx++);
+            int ta = (int) (rt * 255);
+            if (ta > 4) {
+                g.pose().pushMatrix();
+                g.pose().translate(0, Math.round((1f - rt) * 4));
+                GfxEngine.rounded(g, tx, bodyY + 7, tw, 16, 8, ColorUtil.rgba(255, 255, 255, (int) (8 * k * rt)));
+                GfxEngine.outline(g, tx, bodyY + 7, tw, 16, 8, ColorUtil.rgba(255, 255, 255, (int) (16 * k * rt)), 1f);
+                g.pose().popMatrix();
+            }
+            tx += tw + 6;
+        }
+
         // кнопка HUD-редактора
         int hudW = hudButtonW();
-        int hudX = bodyX + bodyW - hudW;
-        boolean hudHover = mouseX >= hudX && mouseX < hudX + hudW && mouseY >= bodyY + 2 && mouseY < bodyY + 22;
-        GfxEngine.rounded(g, hudX, bodyY + 2, hudW, 20, 10,
-                hudHover ? ColorUtil.alpha(theme.accentNow(), 130) : ColorUtil.rgba(255, 255, 255, (int) (16 * t)));
-        GfxEngine.outline(g, hudX, bodyY + 2, hudW, 20, 10,
-                hudHover ? ColorUtil.alpha(theme.accentNow(), 180) : ColorUtil.rgba(255, 255, 255, (int) (24 * t)), 1f);
-        hits.add(new Hit(hudX, bodyY + 2, hudW, 20, 0, () -> {
+        int hudX = hudButtonX();
+        boolean hudHover = mouseX >= hudX && mouseX < hudX + hudW && mouseY >= bodyY + 4 && mouseY < bodyY + 26;
+        RenderUtil.glassChip(g, hudX, bodyY + 4, hudW, 22, 11,
+                hudHover ? ColorUtil.alpha(theme.accentNow(), 100) : ColorUtil.rgba(255, 255, 255, (int) (10 * k)),
+                hudHover ? ColorUtil.alpha(theme.accentNow(), 180) : ColorUtil.rgba(255, 255, 255, (int) (20 * k)), theme);
+        hits.add(new Hit(hudX, bodyY + 4, hudW, 22, 0, () -> {
             playClick();
             Minecraft.getInstance().setScreen(new HudEditorScreen(this));
         }));
 
         // строка поиска: клик по полю возвращает фокус ввода
-        hits.add(new Hit(searchFieldX(), bodyY + 2, SEARCH_W, 20, 0, () -> setFocused(search)));
+        hits.add(new Hit(searchFieldX(), bodyY + 4, SEARCH_W, 22, 0, () -> setFocused(search)));
 
-        // строка поиска
-        GfxEngine.rounded(g, searchFieldX(), bodyY + 2, SEARCH_W, 20, 10, ColorUtil.rgba(255, 255, 255, (int) (12 * t)));
-        GfxEngine.outline(g, searchFieldX(), bodyY + 2, SEARCH_W, 20, 10,
+        // строка поиска (стекло)
+        RenderUtil.glassChip(g, searchFieldX(), bodyY + 4, SEARCH_W, 22, 11,
+                ColorUtil.rgba(255, 255, 255, (int) (8 * k)),
                 search != null && search.isFocused()
                         ? ColorUtil.alpha(theme.accentNow(), 150)
-                        : ColorUtil.rgba(255, 255, 255, (int) (18 * t)), 1f);
+                        : ColorUtil.rgba(255, 255, 255, (int) (18 * k)), theme);
+    }
+
+    /** Каскад тегов шапки (0..1) с задержкой между соседними. */
+    private float tagReveal(int i) {
+        float per = 0.04f;
+        float elapsed = (System.currentTimeMillis() - revealStamp) / 1000f - i * per;
+        return Animation.smooth(Math.max(0f, Math.min(1f, elapsed * 7f)));
     }
 
     private void drawHeaderText(GuiGraphics g) {
-        String title = themeTab ? "Тема" : tab.title;
-        RenderUtil.drawText(g, font, title, bodyX + 2, bodyY + 9, theme.textPrimary(), theme);
+        RenderUtil.drawTextBold(g, font, headerTitle(), bodyX + 2, bodyY + 10, theme.textPrimary(), theme);
+
+        // теги
+        int tx = bodyX + 2 + RenderUtil.widthBold(font, headerTitle(), theme) + 10;
+        int tagIdx = 0;
+        for (String tag : headerTags()) {
+            int tw = RenderUtil.width(font, tag, theme) + 14;
+            if (tx + tw > hudButtonX() - 10) {
+                break;
+            }
+            float rt = tagReveal(tagIdx++);
+            if (rt > 0.02f) {
+                g.pose().pushMatrix();
+                g.pose().translate(0, Math.round((1f - rt) * 4));
+                RenderUtil.drawText(g, font, tag, tx + 7, bodyY + 11,
+                        ColorUtil.alpha(theme.textSecondary(), (int) (210 * rt)), theme);
+                g.pose().popMatrix();
+            }
+            tx += tw + 6;
+        }
 
         int hudW = hudButtonW();
-        int hudX = bodyX + bodyW - hudW;
-        boolean hudHover = mouseX >= hudX && mouseX < hudX + hudW && mouseY >= bodyY + 2 && mouseY < bodyY + 22;
-        RenderUtil.drawText(g, font, "HUD-редактор", hudX + 10, bodyY + 8,
+        int hudX = hudButtonX();
+        boolean hudHover = mouseX >= hudX && mouseX < hudX + hudW && mouseY >= bodyY + 4 && mouseY < bodyY + 26;
+        RenderUtil.drawText(g, font, "HUD-редактор", hudX + 10, bodyY + 10,
                 hudHover ? ColorUtil.rgb(255, 255, 255) : theme.textSecondary(), theme);
+
+        // иконка-лупа поиска
+        float ix = searchFieldX() + 13;
+        float iy = bodyY + 15;
+        GfxEngine.ring(g, ix, iy, 7, ColorUtil.rgba(235, 236, 244, 115), 1f);
+        GfxEngine.circle(g, ix + 3.1f, iy + 3.1f, 1.8f, ColorUtil.rgba(235, 236, 244, 115));
+        GfxEngine.circle(g, ix + 4.1f, iy + 4.1f, 1.4f, ColorUtil.rgba(235, 236, 244, 100));
 
         // строка поиска: значение, курсор и плейсхолдер — всё через движок
         if (search != null) {
             String value = search.getValue();
             boolean focused = search.isFocused();
-            float textX = searchFieldX() + 10;
-            float textY = bodyY + 8;
+            float textX = searchFieldX() + 24;
+            float textY = bodyY + 10;
             if (value.isEmpty()) {
                 // плейсхолдер виден и в фокусе — пустое поле больше не «исчезает»
                 RenderUtil.drawText(g, font, "Поиск...", textX, textY, ColorUtil.rgba(235, 236, 244, 95), theme);
@@ -556,13 +699,48 @@ public class AuroraClickGui extends Screen {
                     GfxEngine.rounded(g, textX, textY + 0.5f, 1, 8, 0.5f, ColorUtil.alpha(theme.accentNow(), 220));
                 }
             } else {
-                RenderUtil.drawText(g, font, RenderUtil.ellipsize(font, value, SEARCH_W - 18, theme),
+                RenderUtil.drawText(g, font, RenderUtil.ellipsize(font, value, SEARCH_W - 30, theme),
                         textX, textY, theme.textPrimary(), theme);
-                if (focused && System.currentTimeMillis() % 1000 < 500) {
-                    float caretX = textX + RenderUtil.width(font, value, theme) + 1;
-                    GfxEngine.rounded(g, caretX, textY + 0.5f, 1, 8, 0.5f, ColorUtil.alpha(theme.accentNow(), 220));
+                if (focused) {
+                    // каретка и выделение — из состояния виджета, не из своего
+                    drawFieldCaret(g, textX, textY, value, search.getCursorPosition(),
+                            search.getHighlighted(), SEARCH_W - 30);
                 }
             }
+        }
+    }
+
+    /**
+     * Каретка и выделение текстового поля — строго из состояния виджета
+     * (cursor + highlighted-строка, 1.21.11 не даёт геттер позиции начала
+     * выделения), координаты в gui-пикселях движка.
+     */
+    private void drawFieldCaret(GuiGraphics g, float textX, float textY, String value,
+                                int cursor, String highlighted, int maxWidth) {
+        int from = cursor;
+        int to = cursor;
+        if (!highlighted.isEmpty()) {
+            if (cursor + highlighted.length() <= value.length()
+                    && value.startsWith(highlighted, cursor)) {
+                from = cursor;
+                to = cursor + highlighted.length();
+            } else {
+                to = cursor;
+                from = cursor - highlighted.length();
+            }
+        }
+        from = Math.max(0, Math.min(from, value.length()));
+        to = Math.max(0, Math.min(to, value.length()));
+        String before = value.substring(0, from);
+        float caretX = textX + RenderUtil.width(font, RenderUtil.ellipsize(font, before, maxWidth, theme), theme) + 1;
+        if (from != to) {
+            // выделение: подсветка между началом и концом выделения
+            String sel = value.substring(from, to);
+            int selW = RenderUtil.width(font, RenderUtil.ellipsize(font, sel, maxWidth, theme), theme);
+            GfxEngine.rounded(g, caretX - 1, textY - 1, Math.max(2, selW + 2), 10, 2,
+                    ColorUtil.alpha(theme.accentNow(), 90));
+        } else if (System.currentTimeMillis() % 1000 < 500) {
+            GfxEngine.rounded(g, caretX, textY + 0.5f, 1, 8, 0.5f, ColorUtil.alpha(theme.accentNow(), 220));
         }
     }
 
@@ -590,13 +768,13 @@ public class AuroraClickGui extends Screen {
     }
 
     private void layoutContent(GuiGraphics g, int winX, int winY) {
-        int cardsTop = bodyY + 28;
-        int viewH = bodyH - 28 - 4;
+        int cardsTop = bodyY + HEADER_H + 4;
+        int viewH = bodyH - HEADER_H - 8;
         if (themeTab) {
             themeRows.clear();
             int colW = Math.min(320, bodyW - 12);
-            int rx = bodyX + (bodyW - colW) / 2;
-            themeRowsH = buildThemeRows(g, themeRows, rx, cardsTop + 18 - (int) scrollPos, colW);
+            int rx = bodyX + (int) ((1f - Animation.smooth(tabAnim.get())) * 16) + (bodyW - colW) / 2;
+            themeRowsH = buildThemeRows(g, themeRows, rx, cardsTop + 14 - (int) scrollPos, colW);
             maxScroll = Math.max(0, themeRowsH + 18 - viewH);
             scrollTarget = Math.max(0, Math.min(maxScroll, scrollTarget));
             scrollPos = Math.min(scrollPos, maxScroll);
@@ -608,23 +786,42 @@ public class AuroraClickGui extends Screen {
         int[] colYs = new int[2];
         int contentH = 0;
 
+        // лёгкий «выезд» контента при смене вкладки
+        float tabT = Animation.smooth(tabAnim.get());
+        int slideX = (int) ((1f - tabT) * 16);
+
+        // кэш переносов описаний: пересчитываем только при смене ширины колонки
+        // (ширина с запасом от тумблера и плюса справа)
+        int descKey = colW - 76;
+        if (descCacheKey != descKey) {
+            descCache.clear();
+            descCacheKey = descKey;
+        }
+
         for (Module m : modules) {
             int col = colYs[0] <= colYs[1] ? 0 : 1;
-            int x = bodyX + col * (colW + GAP);
+            int x = bodyX + slideX + col * (colW + GAP);
             int y = cardsTop + colYs[col] - (int) scrollPos;
             float et = expandT(m);
 
-            List<String> desc = RenderUtil.wrapLimited(font, m.description, colW - 64, theme, 2);
-            int headerH = 22 + Math.max(1, desc.size()) * 10;
+            List<String> desc = descCache.computeIfAbsent(m,
+                    key -> RenderUtil.wrapLimited(font, m.description, descKey, theme, 2));
+            // имя (y+8) + статус (y+19) + строки описания (y+31..) + нижний паддинг
+            int headerH = 38 + Math.max(1, desc.size()) * 10;
             int rowsH = settingsHeight(m);
-            int h = headerH + 6 + Math.round(rowsH * et);
+            // +8 при раскрытии — нижний паддинг настроек, чтобы последняя строка
+            // не прилипала к краю карточки (у свёрнутой карточки +6 достаточно)
+            int h = headerH + 6 + Math.round((rowsH + 8) * et);
 
-            List<Row> rows = et > 0.01f ? buildModuleRows(g, m, x, y + headerH + 8, colW - 20) : List.of();
+            // строки настроек рисуем с отступом 12px от краёв карточки и с
+            // правым запасом 14px — раньше подписи рисовались от самой границы
+            // и «вылезали» за плашку
+            List<Row> rows = et > 0.01f ? buildModuleRows(g, m, x + 12, y + headerH + 8, colW - 26) : List.of();
 
             colYs[col] += h + GAP;
             contentH = Math.max(contentH, colYs[col]);
 
-            cards.add(buildCard(g, m, x, y, colW, h, headerH, desc, rows, et));
+            cards.add(buildCard(g, m, cards.size(), x, y, colW, h, headerH, desc, rows, et));
         }
 
         maxScroll = Math.max(0, contentH - viewH);
@@ -646,45 +843,75 @@ public class AuroraClickGui extends Screen {
         return h;
     }
 
-    private Card buildCard(GuiGraphics g, Module m, int x, int y, int w, int h, int headerH, List<String> desc, List<Row> rows, float et) {
+    /** Время каскадного появления карточки с индексом idx (0..1). */
+    private float revealT(int idx) {
+        float per = 0.03f; // задержка между карточками, сек
+        float elapsed = (System.currentTimeMillis() - revealStamp) / 1000f - idx * per;
+        return Animation.smooth(Math.max(0f, Math.min(1f, elapsed * 8f)));
+    }
+
+    /** Перезапуск каскада (смена вкладки/поиска/открытие меню). */
+    private void resetReveal() {
+        revealStamp = System.currentTimeMillis();
+    }
+
+    private Card buildCard(GuiGraphics g, Module m, int idx, int x, int y, int w, int h, int headerH, List<String> desc, List<Row> rows, float et) {
         boolean hasSettings = !m.settings().isEmpty();
         boolean open = Boolean.TRUE.equals(expanded.get(m));
 
         Runnable shapes = () -> {
+            // каскад: карточка ещё «не наступила» — не рисуем и не даём кликать
+            float rv = revealT(idx);
+            if (rv <= 0.01f) {
+                return;
+            }
             Animation ha = hoverAnims.computeIfAbsent(m, k -> new Animation(0, 10));
             boolean hovered = mouseX >= x && mouseX <= x + w && mouseY >= y && mouseY < y + h;
             ha.to(hovered ? 1 : 0);
             float hover = ha.update();
+            // мягкий подъём карточки под курсором — тело «дышит»
+            float lift = 1.5f * Animation.smooth(hover);
             float toggleT = toggleAnims.computeIfAbsent(m, k -> new Animation(m.isEnabled() ? 1 : 0, 14)).update();
-            int a = (int) (255 * Animation.smooth(tabAnim.get()));
+            int a = (int) (255 * Animation.smooth(tabAnim.get()) * rv);
             if (a < 4) {
                 return;
             }
 
-            // фон карточки: стекло + подсветка при наведении/включении
-            int base = ColorUtil.lerp(ColorUtil.rgba(255, 255, 255, 8), ColorUtil.rgba(255, 255, 255, 18), hover);
-            int fill = ColorUtil.lerp(base, ColorUtil.alpha(theme.accentNow(), 26), toggleT * 0.8f);
+            // лёгкий сдвиг вверх при появлении — карточка «доезжает» на место;
+            // + подъём при наведении
+            int slideY = Math.round((1f - rv) * 7 - lift);
+            g.pose().pushMatrix();
+            g.pose().translate(0, slideY);
+
+            // фон карточки: ровная тёмная плитка (референс) с мягкой подсветкой
+            float k = a / 255f;
+            GfxEngine.rounded(g, x, y, w, h, CARD_R, ColorUtil.rgba(255, 255, 255, (int) (5 * k)));
+            int fill = ColorUtil.lerp(ColorUtil.rgba(255, 255, 255, 5), ColorUtil.rgba(255, 255, 255, 13), hover);
+            fill = ColorUtil.lerp(fill, ColorUtil.alpha(theme.accentNow(), 22), toggleT);
             GfxEngine.rounded(g, x, y, w, h, CARD_R, ColorUtil.alpha(fill, (int) (ColorUtil.alphaI(fill) * a / 255f)));
-            int outline = ColorUtil.lerp(ColorUtil.rgba(255, 255, 255, 16), ColorUtil.alpha(theme.accentNow(), 120), toggleT);
+            // едва заметный градиент-блик сверху карточки
+            GfxEngine.roundedGradient(g, x, y, w, h, CARD_R,
+                    ColorUtil.rgba(255, 255, 255, (int) (6 * k)), ColorUtil.rgba(255, 255, 255, (int) (1 * k)));
+            int outline = ColorUtil.lerp(ColorUtil.rgba(255, 255, 255, 16), ColorUtil.alpha(theme.accentNow(), 90), toggleT);
             if (hovered) {
-                outline = ColorUtil.lerp(outline, ColorUtil.rgba(255, 255, 255, 60), hover * 0.6f);
+                outline = ColorUtil.lerp(outline, ColorUtil.rgba(255, 255, 255, 55), hover * 0.6f);
             }
             GfxEngine.outline(g, x, y, w, h, CARD_R, ColorUtil.alpha(outline, (int) (ColorUtil.alphaI(outline) * a / 255f)), 1f);
 
-            // плюс/минус раскрытия настроек
+            // плюс/минус раскрытия настроек — по вертикали шапки, левее тумблера
             if (hasSettings) {
-                float indX = x + w - 54;
-                float indY = y + 14;
+                float indX = x + w - 56;
+                float indY = y + headerH / 2f;
                 int col = open ? theme.accentNow() : theme.textSecondary();
                 float vis = 1f - et * 0.85f;
-                GfxEngine.rounded(g, indX, indY, 7, 1.4f, 0.7f, ColorUtil.alpha(col, (int) (a * 0.9f)));
+                GfxEngine.rounded(g, indX, indY - 0.7f, 7, 1.4f, 0.7f, ColorUtil.alpha(col, (int) (a * 0.9f)));
                 if (vis > 0.05f) {
-                    GfxEngine.rounded(g, indX + 3, indY - 2.8f, 1.4f, 7, 0.7f, ColorUtil.alpha(col, (int) (a * vis)));
+                    GfxEngine.rounded(g, indX + 2.8f, indY - 4.2f, 1.4f, 7, 0.7f, ColorUtil.alpha(col, (int) (a * vis)));
                 }
             }
 
-            // pill-тумблер
-            drawPill(g, x + w - 36, y + 9, 26, 13, toggleT);
+            // pill-тумблер справа по центру шапки
+            drawPill(g, x + w - 34, y + headerH / 2f - 6.5f, 27, 13, toggleT);
 
             // настройки под шапкой
             if (!rows.isEmpty() && et > 0.01f) {
@@ -715,18 +942,26 @@ public class AuroraClickGui extends Screen {
                     AuroraConfig.markDirty();
                 }));
             }
+            g.pose().popMatrix();
         };
 
         Runnable texts = () -> {
-            int a = (int) (255 * Animation.smooth(tabAnim.get()));
+            float rv = revealT(idx);
+            int a = (int) (255 * Animation.smooth(tabAnim.get()) * rv);
             if (a < 4) {
                 return;
             }
-            int nameColor = m.isEnabled() ? ColorUtil.rgb(255, 255, 255) : theme.textSecondary();
-            RenderUtil.drawText(g, font, m.name, x + 11, y + 7, ColorUtil.alpha(nameColor, a), theme);
+            float lift = 1.5f * Animation.smooth(hoverAnims.containsKey(m) ? hoverAnims.get(m).get() : 0f);
+            g.pose().pushMatrix();
+            g.pose().translate(0, Math.round((1f - rv) * 7 - lift));
+            // имя всегда белым (как на референсе), статус и описание — цвет по состоянию
+            RenderUtil.drawText(g, font, m.name, x + 12, y + 8, ColorUtil.alpha(theme.textPrimary(), a), theme);
+            String status = m.isEnabled() ? "Включен" : "Выключен";
+            int statusColor = m.isEnabled() ? theme.accentNow() : ColorUtil.rgba(235, 236, 244, 125);
+            RenderUtil.drawText(g, font, status, x + 12, y + 19, ColorUtil.alpha(statusColor, a), theme);
             for (int i = 0; i < desc.size(); i++) {
-                RenderUtil.drawText(g, font, desc.get(i), x + 11, y + 18 + i * 10,
-                        ColorUtil.alpha(theme.textSecondary(), (int) (a * 0.92f)), theme);
+                RenderUtil.drawText(g, font, desc.get(i), x + 12, y + 31 + i * 10,
+                        ColorUtil.alpha(theme.textSecondary(), (int) (a * 0.85f)), theme);
             }
             if (!rows.isEmpty() && expandT(m) > 0.01f) {
                 RenderUtil.pushScissor(g, x + 1, y + headerH + 3, x + w - 1, y + h - 1);
@@ -735,13 +970,14 @@ public class AuroraClickGui extends Screen {
                 }
                 RenderUtil.popScissor(g);
             }
+            g.pose().popMatrix();
         };
 
-        return new Card(m, x, y, w, h, headerH, rows, shapes, texts);
+        return new Card(m, idx, x, y, w, h, headerH, rows, shapes, texts);
     }
 
     private void drawBodyShapes(GuiGraphics g) {
-        RenderUtil.pushScissor(g, bodyX, bodyY + 26, bodyX + bodyW, bodyY + bodyH);
+        RenderUtil.pushScissor(g, bodyX, bodyY + HEADER_H - 2, bodyX + bodyW, bodyY + bodyH);
         if (themeTab) {
             for (Row row : themeRows) {
                 row.shapes().run();
@@ -756,21 +992,25 @@ public class AuroraClickGui extends Screen {
         }
         RenderUtil.popScissor(g);
 
-        // полоса прокрутки
+        // полоса прокрутки: подсветка и утолщение при наведении на тело
         if (maxScroll > 0) {
-            int trackH = bodyH - 34;
-            float ratio = (float) (bodyH - 28) / (maxScroll + bodyH - 28);
+            boolean bodyHover = mouseX >= bodyX && mouseX <= bodyX + bodyW
+                    && mouseY >= bodyY && mouseY <= bodyY + bodyH;
+            float st = theme.animations ? scrollAnim.apply(bodyHover ? 1f : 0f) : 0f;
+            int trackH = bodyH - HEADER_H - 8;
+            float ratio = (float) (bodyH - HEADER_H - 4) / (maxScroll + bodyH - HEADER_H - 4);
             int thumbH = Math.max(18, (int) (trackH * ratio));
-            int thumbY = bodyY + 30 + (int) ((trackH - thumbH) * (scrollPos / (float) maxScroll));
-            GfxEngine.rounded(g, bodyX + bodyW - 4, bodyY + 30, 3, trackH, 1.5f,
-                    ColorUtil.rgba(255, 255, 255, 16));
-            GfxEngine.rounded(g, bodyX + bodyW - 4, thumbY, 3, thumbH, 1.5f,
-                    ColorUtil.alpha(theme.accentNow(), 150));
+            int thumbY = bodyY + HEADER_H + 2 + (int) ((trackH - thumbH) * (scrollPos / (float) maxScroll));
+            int thumbW = 3 + Math.round(st);
+            GfxEngine.rounded(g, bodyX + bodyW - 4, bodyY + HEADER_H + 2, thumbW, trackH, 1.5f,
+                    ColorUtil.rgba(255, 255, 255, (int) (16 + 14 * st)));
+            GfxEngine.rounded(g, bodyX + bodyW - 4, thumbY, thumbW, thumbH, 1.5f,
+                    ColorUtil.alpha(theme.accentNow(), (int) (120 + 100 * st)));
         }
     }
 
     private void drawBodyTexts(GuiGraphics g) {
-        RenderUtil.pushScissor(g, bodyX, bodyY + 26, bodyX + bodyW, bodyY + bodyH);
+        RenderUtil.pushScissor(g, bodyX, bodyY + HEADER_H - 2, bodyX + bodyW, bodyY + bodyH);
         if (themeTab) {
             for (Row row : themeRows) {
                 row.texts().run();
@@ -779,10 +1019,10 @@ public class AuroraClickGui extends Screen {
             if (cards.isEmpty()) {
                 boolean searching = search != null && !search.getValue().isEmpty();
                 RenderUtil.drawText(g, font, searching ? "Ничего не найдено" : "Здесь пока пусто",
-                        bodyX + 12, bodyY + 40, theme.textSecondary(), theme);
+                        bodyX + 12, bodyY + 48, theme.textSecondary(), theme);
                 if (searching) {
                     RenderUtil.drawText(g, font, "Очистите поиск или смените вкладку слева",
-                            bodyX + 12, bodyY + 52, ColorUtil.alpha(theme.textSecondary(), 120), theme);
+                            bodyX + 12, bodyY + 60, ColorUtil.alpha(theme.textSecondary(), 120), theme);
                 }
             }
             for (Card card : cards) {
@@ -815,9 +1055,9 @@ public class AuroraClickGui extends Screen {
                 rows.add(boolRow(g, s.name, x, cy, w, bs::get, v -> {
                     bs.set(v);
                     AuroraConfig.markDirty();
-                }));
+                }, bs));
             } else if (s instanceof NumberSetting ns) {
-                rows.add(sliderRow(g, s.name, x, cy, w, ns::progress, ns::display, p -> ns.setByProgress(p)));
+                rows.add(sliderRow(g, s.name, x, cy, w, ns::progress, ns::display, p -> ns.setByProgress(p), ns));
             } else if (s instanceof ColorSetting cs) {
                 rows.add(colorRow(g, s.name, x, cy, w, cs::get, cs::set, cs));
             } else if (s instanceof ModeSetting ms) {
@@ -833,33 +1073,56 @@ public class AuroraClickGui extends Screen {
         return rows;
     }
 
-    /** Строка-переключатель. */
-    private Row boolRow(GuiGraphics g, String label, int x, int y, int w, Supplier<Boolean> get, Consumer<Boolean> set) {
+    /** Строка-переключатель (тумблер плавно анимируется). id — стабильный ключ анимации. */
+    private Row boolRow(GuiGraphics g, String label, int x, int y, int w, Supplier<Boolean> get, Consumer<Boolean> set, Object id) {
         return new Row(() -> {
-            float t = get.get() ? 1f : 0f;
+            boolean on = get.get();
+            Animation anim = settingAnims.computeIfAbsent(id,
+                    key -> new Animation(on ? 1f : 0f, 14));
+            anim.to(on ? 1f : 0f);
+            float t = anim.update();
             drawPill(g, x + w - 24, y + 2, 22, 12, t);
             hits.add(new Hit(x, y - 1, w, 15, 0, () -> {
                 set.accept(!get.get());
                 playClick();
             }));
-        }, () -> RenderUtil.drawText(g, font, label, x, y + 4, theme.textSecondary(), theme));
+        }, () -> RenderUtil.drawText(g, font, RenderUtil.ellipsize(font, label, Math.max(12, w - 32), theme), x, y + 4, theme.textSecondary(), theme));
     }
 
-    /** Строка-слайдер. */
+    /** Строка-слайдер. id — ключ анимации наведения (стабильный объект). */
     private Row sliderRow(GuiGraphics g, String label, int x, int y, int w, Supplier<Float> progress,
-                          Supplier<String> display, Consumer<Float> set) {
+                          Supplier<String> display, Consumer<Float> set, Object id) {
         return new Row(() -> {
             int trackY = y + 14;
-            int trackX = x + 2;
-            int trackW = w - 4;
+            int trackX = x;
+            int trackW = w;
             float p = Math.max(0f, Math.min(1f, progress.get()));
-            GfxEngine.rounded(g, trackX, trackY, trackW, 4, 2, ColorUtil.rgba(255, 255, 255, 30));
-            int fillW = (int) (trackW * p);
+            // наведение: палец растёт и получает акцентное кольцо
+            boolean hovered = mouseX >= trackX - 4 && mouseX <= trackX + trackW + 4
+                    && mouseY >= trackY - 7 && mouseY <= trackY + 12;
+            float hoverT = sliderHoverAnims.computeIfAbsent(id, k -> new Animation(0, 12))
+                    .apply(hovered ? 1f : 0f);
+            int fillW = Math.round(trackW * p);
+            // дорожка: темная капсула + внутренняя подсветка сверху
+            GfxEngine.rounded(g, trackX, trackY, trackW, 5, 2.5f, ColorUtil.rgba(255, 255, 255, 26));
+            GfxEngine.rounded(g, trackX, trackY, trackW, 1.5f, 0.75f, ColorUtil.rgba(255, 255, 255, 18));
             if (fillW > 3) {
-                GfxEngine.rounded(g, trackX, trackY, fillW, 4, 2, theme.accentNow());
+                // заполнение: вертикальный градиент акцента — объёмная «капля»
+                GfxEngine.roundedGradient(g, trackX, trackY, fillW, 5, 2.5f,
+                        ColorUtil.alpha(theme.accentNow(), 245), ColorUtil.alpha(theme.accent(1.0f), 205));
             }
-            GfxEngine.circle(g, trackX + fillW, trackY + 2, 9, ColorUtil.rgb(255, 255, 255));
-            GfxEngine.ring(g, trackX + fillW, trackY + 2, 11, ColorUtil.rgba(0, 0, 0, 70), 1f);
+            float kx = trackX + fillW;
+            float ky = trackY + 2.5f;
+            float d = 8 + 2.5f * hoverT;
+            // мягкое свечение под пальцем при наведении/перетаскивании
+            if (hoverT > 0.05f) {
+                GfxEngine.glow(g, kx - d, ky - d, d * 2, d * 2, d, 5f,
+                        ColorUtil.alpha(theme.accentNow(), (int) (110 * hoverT)));
+            }
+            GfxEngine.circle(g, kx, ky, d, ColorUtil.rgb(255, 255, 255));
+            GfxEngine.ring(g, kx, ky, d + 2.5f,
+                    ColorUtil.alpha(theme.accentNow(), (int) (90 + 120 * hoverT)), 1.5f);
+            GfxEngine.circle(g, kx, ky, d * 0.35f, ColorUtil.alpha(theme.accentNow(), 230));
             hits.add(new Hit(trackX - 4, trackY - 6, trackW + 8, 16, 0, () -> {
                 set.accept(clampP((mouseX - trackX) / (float) trackW));
                 sliderX = trackX;
@@ -868,9 +1131,11 @@ public class AuroraClickGui extends Screen {
                 playClick();
             }));
         }, () -> {
-            RenderUtil.drawText(g, font, label, x, y + 2, theme.textSecondary(), theme);
             String disp = display.get();
-            RenderUtil.drawText(g, font, disp, x + w - RenderUtil.width(font, disp, theme), y + 2,
+            // подпись не должна доеезжать до значения: обрезаем с запасом 8px
+            String safe = RenderUtil.ellipsize(font, label, Math.max(12, w - RenderUtil.width(font, disp, theme) - 8), theme);
+            RenderUtil.drawText(g, font, safe, x, y + 3, theme.textSecondary(), theme);
+            RenderUtil.drawText(g, font, disp, x + w - RenderUtil.width(font, disp, theme), y + 3,
                     theme.textPrimary(), theme);
         });
     }
@@ -893,27 +1158,37 @@ public class AuroraClickGui extends Screen {
         }, () -> RenderUtil.drawText(g, font, label, x, y + 4, theme.textSecondary(), theme));
     }
 
-    /** Строка режима (значение со стрелками). */
+    /** Строка режима: чип со стрелками, подсветка зоны наведения. */
     private Row modeRow(GuiGraphics g, String label, int x, int y, int w, ModeSetting ms) {
         return new Row(() -> {
-            int valW = RenderUtil.width(font, ms.display(), theme) + 30;
+            int valW = RenderUtil.width(font, ms.display(), theme) + 34;
             int vx = x + w - valW;
-            GfxEngine.rounded(g, vx, y + 1, valW, 14, 7, ColorUtil.rgba(255, 255, 255, 18));
-            hits.add(new Hit(vx, y, 13, 15, 0, () -> {
+            boolean hoverL = mouseX >= vx && mouseX < vx + 14 && mouseY >= y && mouseY < y + 15;
+            boolean hoverR = mouseX >= vx + valW - 14 && mouseX <= vx + valW && mouseY >= y && mouseY < y + 15;
+            GfxEngine.rounded(g, vx, y + 1, valW, 14, 7,
+                    hoverL || hoverR ? ColorUtil.rgba(255, 255, 255, 34) : ColorUtil.rgba(255, 255, 255, 16));
+            GfxEngine.outline(g, vx, y + 1, valW, 14, 7,
+                    hoverL || hoverR ? ColorUtil.alpha(theme.accentNow(), 130) : ColorUtil.rgba(255, 255, 255, 14), 1f);
+            hits.add(new Hit(vx, y, 14, 15, 0, () -> {
                 ms.cycle(-1);
                 playClick();
             }));
-            hits.add(new Hit(vx + valW - 13, y, 13, 15, 0, () -> {
+            hits.add(new Hit(vx + valW - 14, y, 14, 15, 0, () -> {
                 ms.cycle(1);
                 playClick();
             }));
         }, () -> {
-            int valW = RenderUtil.width(font, ms.display(), theme) + 30;
+            int valW = RenderUtil.width(font, ms.display(), theme) + 34;
             int vx = x + w - valW;
-            RenderUtil.drawText(g, font, label, x, y + 4, theme.textSecondary(), theme);
-            RenderUtil.drawText(g, font, "<", vx + 5, y + 4, theme.textSecondary(), theme);
-            RenderUtil.drawText(g, font, ms.display(), vx + 15, y + 4, theme.textPrimary(), theme);
-            RenderUtil.drawText(g, font, ">", vx + valW - 10, y + 4, theme.textSecondary(), theme);
+            boolean hoverL = mouseX >= vx && mouseX < vx + 14 && mouseY >= y && mouseY < y + 15;
+            boolean hoverR = mouseX >= vx + valW - 14 && mouseX <= vx + valW && mouseY >= y && mouseY < y + 15;
+            RenderUtil.drawText(g, font, RenderUtil.ellipsize(font, label, Math.max(12, w - valW - 8), theme), x, y + 4, theme.textSecondary(), theme);
+            // аккуратные уголки-стрелки вместо угловатых < и >
+            RenderUtil.drawText(g, font, "‹", vx + 5, y + 4,
+                    hoverL ? theme.accentNow() : theme.textSecondary(), theme);
+            RenderUtil.drawText(g, font, ms.display(), vx + 17, y + 4, theme.textPrimary(), theme);
+            RenderUtil.drawText(g, font, "›", vx + valW - 10, y + 4,
+                    hoverR ? theme.accentNow() : theme.textSecondary(), theme);
         });
     }
 
@@ -924,8 +1199,15 @@ public class AuroraClickGui extends Screen {
             String keyText = isListening ? "..." : keyName(get.get());
             int bw = Math.max(42, RenderUtil.width(font, keyText, theme) + 16);
             int bx = x + w - bw;
+            // пульсация захваченной кнопки — приглашение нажать клавишу
+            int pulse = isListening
+                    ? (int) (120 + 105 * (0.5f + 0.5f * Math.sin(System.currentTimeMillis() / 180.0)))
+                    : 255;
             GfxEngine.rounded(g, bx, y + 1, bw, 14, 7,
-                    isListening ? theme.accentNow() : ColorUtil.rgba(255, 255, 255, 18));
+                    isListening ? ColorUtil.alpha(theme.accentNow(), pulse) : ColorUtil.rgba(255, 255, 255, 18));
+            if (isListening) {
+                GfxEngine.outline(g, bx, y + 1, bw, 14, 7, ColorUtil.alpha(theme.accentNow(), pulse), 1f);
+            }
             hits.add(new Hit(bx, y, bw, 15, 0, () -> {
                 listeningBind = id;
                 playClick();
@@ -935,7 +1217,7 @@ public class AuroraClickGui extends Screen {
             String keyText = isListening ? "..." : keyName(get.get());
             int bw = Math.max(42, RenderUtil.width(font, keyText, theme) + 16);
             int bx = x + w - bw;
-            RenderUtil.drawText(g, font, label, x, y + 4, theme.textSecondary(), theme);
+            RenderUtil.drawText(g, font, RenderUtil.ellipsize(font, label, Math.max(12, w - bw - 8), theme), x, y + 4, theme.textSecondary(), theme);
             RenderUtil.drawText(g, font, keyText, bx + bw / 2f - RenderUtil.width(font, keyText, theme) / 2f, y + 4,
                     isListening ? ColorUtil.rgb(255, 255, 255) : theme.textPrimary(), theme);
         });
@@ -1010,33 +1292,55 @@ public class AuroraClickGui extends Screen {
         rows.add(boolRow(g, "Радужный акцент", x, cy, w, () -> theme.rainbow, v -> {
             theme.rainbow = v;
             AuroraConfig.save();
-        }));
+        }, "rainbow"));
         cy += 17;
         rows.add(sliderRow(g, "Прозрачность панелей", x, cy, w,
                 () -> theme.backgroundAlpha, () -> String.format("%.2f", theme.backgroundAlpha),
-                p -> theme.backgroundAlpha = Math.max(0.05f, Math.min(1.0f, p))));
+                p -> theme.backgroundAlpha = Math.max(0.05f, Math.min(1.0f, p)), "bgAlpha"));
         cy += 25;
         rows.add(boolRow(g, "Блюр за меню", x, cy, w, () -> theme.blur, v -> {
             theme.blur = v;
             AuroraConfig.save();
-        }));
+        }, "blur"));
         cy += 17;
         rows.add(sliderRow(g, "Сила блюра", x, cy, w,
                 () -> theme.blurStrength / 10.0f, () -> String.valueOf(theme.blurStrength),
-                p -> theme.blurStrength = Math.round(p * 10)));
+                p -> theme.blurStrength = Math.round(p * 10), "blurStrength"));
         cy += 25;
         rows.add(boolRow(g, "Анимации", x, cy, w, () -> theme.animations, v -> {
             theme.animations = v;
             AuroraConfig.save();
-        }));
+        }, "animations"));
         cy += 17;
         rows.add(boolRow(g, "Шрифт Inter", x, cy, w, () -> theme.customFont, v -> {
             theme.customFont = v;
             AuroraConfig.save();
-        }));
+        }, "customFont"));
         cy += 17;
         rows.add(menuKeyRow(g, "Клавиша меню", x, cy, w));
         cy += 17;
+
+        // кнопка сброса темы (переехала сюда из футера)
+        final int resetY = cy + 6;
+        rows.add(new Row(() -> {
+            int rw = 150;
+            int rx = x + (w - rw) / 2;
+            boolean hov = mouseX >= rx && mouseX < rx + rw && mouseY >= resetY && mouseY < resetY + 20;
+            RenderUtil.glassChip(g, rx, resetY, rw, 20, 10,
+                    hov ? ColorUtil.rgba(248, 113, 113, 55) : ColorUtil.rgba(255, 255, 255, 12),
+                    hov ? ColorUtil.rgba(248, 113, 113, 130) : ColorUtil.rgba(255, 255, 255, 26), theme);
+            hits.add(new Hit(rx, resetY, rw, 20, 0, () -> {
+                theme.resetToDefault();
+                AuroraConfig.save();
+                playClick();
+            }));
+        }, () -> {
+            int rw = 150;
+            int rx = x + (w - rw) / 2;
+            RenderUtil.drawCenteredText(g, font, "Сбросить тему", rx + rw / 2f, resetY + 6,
+                    theme.textPrimary(), theme);
+        }));
+        cy += 34;
 
         return cy - y + 8;
     }
@@ -1069,10 +1373,15 @@ public class AuroraClickGui extends Screen {
     /*  Контролы                                                          */
     /* ------------------------------------------------------------------ */
 
-    /** Pill-тумблер с гладким круглым ползунком. */
+    /** Pill-тумблер с гладким круглым ползунком и свечением включённого состояния. */
     private void drawPill(GuiGraphics g, float x, float y, float w, float h, float t) {
         t = Math.max(0f, Math.min(1f, t));
         int track = ColorUtil.lerp(ColorUtil.rgba(255, 255, 255, 34), theme.accentNow(), t);
+        if (t > 0.35f) {
+            // мягкое акцентное свечение вокруг включённого тумблера
+            GfxEngine.glow(g, x - 3, y - 3, w + 6, h + 6, h / 2f, 4f,
+                    ColorUtil.alpha(theme.accentNow(), (int) (70 * t)));
+        }
         GfxEngine.rounded(g, x, y, w, h, h / 2f, track);
         float knob = h - 4;
         float kx = x + 2 + (w - knob - 4) * t;
@@ -1088,8 +1397,13 @@ public class AuroraClickGui extends Screen {
     /* ------------------------------------------------------------------ */
 
     private void drawColorPickerShapes(GuiGraphics g, int x, int y, int w, int h, int current, Consumer<Integer> setter) {
-        GfxEngine.rounded(g, x, y, w, h, 8, ColorUtil.rgba(12, 13, 20, 240));
-        GfxEngine.outline(g, x, y, w, h, 8, ColorUtil.rgba(255, 255, 255, 36), 1f);
+        // плотная всплывашка пипетки: раньше тут была theme.panelColor(),
+        // которая при низкой прозрачности панелей просвечивала насквозь
+        GfxEngine.rounded(g, x, y, w, h, 8, ColorUtil.rgba(14, 15, 23, 242));
+        GfxEngine.roundedGradient(g, x, y, w, h, 8,
+                ColorUtil.rgba(255, 255, 255, 26), ColorUtil.rgba(255, 255, 255, 4));
+        GfxEngine.outline(g, x, y, w, h, 8, ColorUtil.rgba(255, 255, 255, 46), 1f);
+        GfxEngine.rounded(g, x + 12, y + 1, w - 24, 1, 0.5f, ColorUtil.rgba(255, 255, 255, 64));
 
         float[] hsb = ColorUtil.hsb(current);
         int fx = x + 8;
@@ -1159,48 +1473,175 @@ public class AuroraClickGui extends Screen {
     }
 
     /* ------------------------------------------------------------------ */
-    /*  Футер                                                             */
+    /*  Диалог профиля (смена никнейма)                                    */
     /* ------------------------------------------------------------------ */
 
-    private void drawFooterShapes(GuiGraphics g, int winX, int winY) {
-        int footY = winY + WIN_H - FOOTER_H + 3;
-        int btnX = winX + WIN_W - 14;
-        btnX = footerButton(g, btnX, footY, "Сохранить", true, () -> {
-            AuroraConfig.save();
-            playClick();
-        });
-        footerButton(g, btnX, footY, "Сброс", false, () -> {
-            theme.resetToDefault();
-            playClick();
-        });
+    private static final int PROFILE_W = 250;
+    private static final int PROFILE_H = 112;
+
+    private int profileFieldX(int winX) {
+        return winX + (WIN_W - PROFILE_W) / 2;
     }
 
-    private void drawFooterTexts(GuiGraphics g, int winX, int winY) {
-        int footY = winY + WIN_H - FOOTER_H + 3;
-        RenderUtil.drawText(g, font, "ЛКМ — вкл/выкл · ПКМ — настройки · Колесо — прокрутка",
-                bodyX + 2, footY + 6, theme.textSecondary(), theme);
-        int btnX = winX + WIN_W - 14;
-        String save = "Сохранить";
-        int saveW = RenderUtil.width(font, save, theme) + 18;
-        RenderUtil.drawText(g, font, save, btnX - saveW + 9, footY + 6, theme.textPrimary(), theme);
-        String reset = "Сброс";
-        int resetW = RenderUtil.width(font, reset, theme) + 18;
-        int resetX = btnX - saveW - 6 - resetW;
-        RenderUtil.drawText(g, font, reset, resetX + 9, footY + 6, theme.textPrimary(), theme);
+    private int profileFieldY(int winY) {
+        return winY + 52;
     }
 
-    private static final int FOOTER_H = 24;
+    private void openProfileDialog() {
+        profileOpen = true;
+        profileError = null;
+        if (nickField != null) {
+            nickField.setValue(ProfileManager.currentName());
+            nickField.setCursorPosition(nickField.getValue().length());
+            nickField.setHighlightPos(0);
+        }
+        dialogAnim.snap(0);
+        dialogAnim.to(1);
+        setFocused(nickField);
+    }
 
-    private int footerButton(GuiGraphics g, int rightX, int y, String label, boolean primary, Runnable action) {
-        int tw = RenderUtil.width(font, label, theme) + 18;
-        int bx = rightX - tw;
-        boolean hover = mouseX >= bx && mouseX < rightX && mouseY >= y && mouseY < y + 18;
-        int bg = primary
-                ? (hover ? ColorUtil.alpha(theme.accentNow(), 165) : ColorUtil.alpha(theme.accentNow(), 105))
-                : (hover ? ColorUtil.alpha(theme.accentNow(), 80) : ColorUtil.rgba(255, 255, 255, 16));
-        GfxEngine.rounded(g, bx, y, tw, 18, 9, bg);
-        hits.add(new Hit(bx, y, tw, 18, 0, action));
-        return bx - 6;
+    private void closeProfileDialog() {
+        profileOpen = false;
+        profileError = null;
+        dialogAnim.to(0);
+        setFocused(search);
+    }
+
+    private void applyNick() {
+        if (nickField == null) {
+            return;
+        }
+        String value = nickField.getValue().trim();
+        if (!ProfileManager.isValid(value)) {
+            profileError = "3–16 символов: латиница, цифры, _";
+            profileErrorTime = System.currentTimeMillis();
+            return;
+        }
+        AuroraConfig.setNickname(value);
+        playClick();
+        closeProfileDialog();
+    }
+
+    private void drawProfileDialogShapes(GuiGraphics g, int winX, int winY) {
+        float dt = dialogAnim.get();
+        if (dt < 0.01f) {
+            return;
+        }
+        float k = Animation.smooth(dt);
+        // pop-масштаб диалога: маленький «пружинный» выезд (лёгкий перелёт)
+        float pop = theme.animations ? Animation.easeOutBack(dt) : 1f;
+        int dx = profileFieldX(winX);
+        int dy = profileFieldY(winY) - 34;
+
+        // затемнение окна под диалогом + «стеклянная» карточка;
+        // подложка почти непрозрачная — раньше сквозь неё просвечивал
+        // текст карточек, и диалог выглядел сломанным
+        GfxEngine.rounded(g, winX, winY, WIN_W, WIN_H, WIN_R, ColorUtil.rgba(5, 6, 10, (int) (232 * k)));
+        float dcx = dx + PROFILE_W / 2f;
+        float dcy = dy + PROFILE_H / 2f;
+        float ps = 0.92f + 0.08f * pop;
+        g.pose().pushMatrix();
+        g.pose().translate(dcx, dcy);
+        g.pose().scale(ps, ps);
+        g.pose().translate(-dcx, -dcy);
+        RenderUtil.softShadow(g, dx, dy, PROFILE_W, PROFILE_H, 14, (int) (150 * k));
+        GfxEngine.rounded(g, dx, dy, PROFILE_W, PROFILE_H, 14,
+                ColorUtil.rgba(14, 15, 23, (int) (242 * k)));
+        GfxEngine.roundedGradient(g, dx, dy, PROFILE_W, PROFILE_H, 14,
+                ColorUtil.rgba(255, 255, 255, (int) (26 * k)), ColorUtil.rgba(255, 255, 255, (int) (4 * k)));
+        GfxEngine.outline(g, dx, dy, PROFILE_W, PROFILE_H, 14, ColorUtil.rgba(255, 255, 255, (int) (48 * k)), 1f);
+        GfxEngine.rounded(g, dx + 20, dy + 1, PROFILE_W - 40, 1, 0.5f, ColorUtil.rgba(255, 255, 255, (int) (70 * k)));
+
+        // поле ввода (стекло)
+        boolean focused = nickField != null && nickField.isFocused();
+        RenderUtil.glassChip(g, dx + 16, dy + 40, PROFILE_W - 32, 20, 9,
+                ColorUtil.rgba(255, 255, 255, (int) (14 * k)),
+                focused ? ColorUtil.alpha(theme.accentNow(), (int) (170 * k)) : ColorUtil.rgba(255, 255, 255, (int) (28 * k)), theme);
+
+        // всплеск ошибки на границе поля
+        if (profileError != null && System.currentTimeMillis() - profileErrorTime < 2500) {
+            GfxEngine.outline(g, dx + 16, dy + 40, PROFILE_W - 32, 20, 9,
+                    ColorUtil.rgba(248, 113, 113, (int) (200 * k)), 1.2f);
+        }
+
+        // кнопки
+        int bw = (PROFILE_W - 32 - 8) / 2;
+        int by = dy + PROFILE_H - 30;
+        RenderUtil.glassChip(g, dx + 16, by, bw, 20, 9,
+                ColorUtil.alpha(theme.accentNow(), (int) (120 * k)),
+                ColorUtil.alpha(theme.accentNow(), (int) (180 * k)), theme);
+        RenderUtil.glassChip(g, dx + 16 + bw + 8, by, bw, 20, 9,
+                ColorUtil.rgba(255, 255, 255, (int) (14 * k)),
+                ColorUtil.rgba(255, 255, 255, (int) (30 * k)), theme);
+
+        // зоны клика: сначала «подложка» (клик мимо диалога закрывает),
+        // затем поле и кнопки — они добавляются позже и приоритетнее
+        hits.add(new Hit(winX, winY, WIN_W, WIN_H, -1, this::closeProfileDialog));
+        hits.add(new Hit(dx + 16, dy + 40, PROFILE_W - 32, 20, 0, () -> setFocused(nickField)));
+        hits.add(new Hit(dx + 16, by, bw, 20, 0, this::applyNick));
+        hits.add(new Hit(dx + 16 + bw + 8, by, bw, 20, 0, this::closeProfileDialog));
+        g.pose().popMatrix();
+    }
+
+    private void drawProfileDialogTexts(GuiGraphics g, int winX, int winY) {
+        float dt = dialogAnim.get();
+        if (dt < 0.01f) {
+            return;
+        }
+        int k = (int) (255 * Animation.smooth(dt));
+        int dx = profileFieldX(winX);
+        int dy = profileFieldY(winY) - 34;
+        // тот же pop-масштаб, что у форм — текст едет вместе с диалогом
+        float pop = theme.animations ? Animation.easeOutBack(dt) : 1f;
+        float ps = 0.92f + 0.08f * pop;
+        float dcx = dx + PROFILE_W / 2f;
+        float dcy = dy + PROFILE_H / 2f;
+        g.pose().pushMatrix();
+        g.pose().translate(dcx, dcy);
+        g.pose().scale(ps, ps);
+        g.pose().translate(-dcx, -dcy);
+
+        RenderUtil.drawTextBold(g, font, "Смена никнейма", dx + 16, dy + 12,
+                ColorUtil.alpha(theme.textPrimary(), k), theme);
+        RenderUtil.drawText(g, font, "Виден в меню и на офлайн-серверах", dx + 16, dy + 25,
+                ColorUtil.alpha(theme.textSecondary(), (int) (k * 0.85f)), theme);
+
+        if (nickField != null) {
+            String value = nickField.getValue();
+            boolean focused = nickField.isFocused();
+            float textX = dx + 24;
+            float textY = dy + 46;
+            if (value.isEmpty()) {
+                RenderUtil.drawText(g, font, "Ваш никнейм", textX, textY,
+                        ColorUtil.rgba(235, 236, 244, (int) (95 * dt)), theme);
+                if (focused && System.currentTimeMillis() % 1000 < 500) {
+                    GfxEngine.rounded(g, textX, textY + 0.5f, 1, 8, 0.5f, ColorUtil.alpha(theme.accentNow(), 220));
+                }
+            } else {
+                RenderUtil.drawText(g, font, RenderUtil.ellipsize(font, value, PROFILE_W - 52, theme), textX, textY,
+                        ColorUtil.alpha(theme.textPrimary(), k), theme);
+                if (focused) {
+                    // каретка и выделение — из состояния виджета, не из своего
+                    drawFieldCaret(g, textX, textY, value, nickField.getCursorPosition(),
+                            nickField.getHighlighted(), PROFILE_W - 52);
+                }
+            }
+        }
+
+        // ошибка
+        if (profileError != null && System.currentTimeMillis() - profileErrorTime < 2500) {
+            RenderUtil.drawText(g, font, profileError, dx + 16, dy + 66,
+                    ColorUtil.alpha(ColorUtil.rgb(248, 113, 113), k), theme);
+        }
+
+        // подписи кнопок
+        int bw = (PROFILE_W - 32 - 8) / 2;
+        int by = dy + PROFILE_H - 30;
+        RenderUtil.drawCenteredText(g, font, "Сменить", dx + 16 + bw / 2f, by + 6,
+                ColorUtil.alpha(ColorUtil.rgb(255, 255, 255), k), theme);
+        RenderUtil.drawCenteredText(g, font, "Отмена", dx + 16 + bw + 8 + bw / 2f, by + 6,
+                ColorUtil.alpha(theme.textSecondary(), k), theme);
+        g.pose().popMatrix();
     }
 
     /* ------------------------------------------------------------------ */
@@ -1275,6 +1716,21 @@ public class AuroraClickGui extends Screen {
     @Override
     public boolean keyPressed(KeyEvent e) {
         int key = e.key();
+        if (profileOpen) {
+            if (key == GLFW.GLFW_KEY_ESCAPE) {
+                closeProfileDialog();
+                return true;
+            }
+            if (key == GLFW.GLFW_KEY_ENTER || key == GLFW.GLFW_KEY_KP_ENTER) {
+                applyNick();
+                return true;
+            }
+            if (key == theme.menuKey) {
+                // не закрываем меню, пока пользователь вводит ник
+                return true;
+            }
+            return super.keyPressed(e);
+        }
         if (listeningBind != null) {
             if (key == GLFW.GLFW_KEY_ESCAPE) {
                 listeningBind = null;
@@ -1315,7 +1771,12 @@ public class AuroraClickGui extends Screen {
         }
         closing = true;
         openAnim.to(0);
-        openAnim.snap(Math.max(0.02f, openAnim.get()));
+        // если значение уже у нуля — отступаем чуть назад, чтобы анимация
+        // закрытия действительно поехала (snap перезаписывает target,
+        // поэтому вызывать его здесь нельзя — иначе закрытие отменялось)
+        if (openAnim.get() < 0.03f) {
+            openAnim.snap(0.03f);
+        }
     }
 
     /** Полное закрытие: возвращаемся на родительский экран, если он есть. */
@@ -1359,5 +1820,10 @@ public class AuroraClickGui extends Screen {
         openAnim.to(1);
         tabAnim.snap(0.0f);
         tabAnim.to(1);
+        // индикатор сразу на активной категории — без «прыжка» с нуля;
+        // каскад карточек стартует вместе с открытием окна
+        sideIndicator.snap(46 + (themeTab ? Category.values().length : tab.ordinal()) * 30
+                + (themeTab ? 2 : 0));
+        resetReveal();
     }
 }

@@ -6,11 +6,13 @@
         "client": [
                 "GameRendererMixin",
                 "ScreenEffectRendererMixin",
+                "ScreenMixin",
                 "MouseHandlerMixin",
                 "GuiRendererMixin",
                 "ChatComponentMixin",
                 "ChatScreenMixin",
-                "ChatComponentAccessor"
+                "ChatComponentAccessor",
+                "MinecraftAccessor"
         ],
         "injectors": {
                 "defaultRequire": 1

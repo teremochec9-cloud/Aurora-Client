@@ -107,9 +107,9 @@ public class AuroraTitleScreen extends Screen {
         } catch (IllegalStateException ignored) {
         }
 
-        // тёмный градиент поверх
+        // тёмный градиент поверх — мягче, чтобы панорама просвечивала сквозь стекло
         g.fillGradient(0, 0, this.width, this.height,
-                ColorUtil.rgba(9, 10, 17, 125), ColorUtil.rgba(8, 9, 14, 170));
+                ColorUtil.rgba(9, 10, 17, 95), ColorUtil.rgba(8, 9, 14, 135));
 
         // мягкие «ленты северного сияния» — большие мягкие пятна света
         long time = System.currentTimeMillis();
@@ -189,9 +189,13 @@ public class AuroraTitleScreen extends Screen {
         g.pose().translate(-ccx, -ccy);
 
         RenderUtil.softShadow(g, cardX, cardY, cardW, cardH, 18, 150);
-        GfxEngine.rounded(g, cardX, cardY, cardW, cardH, 18, ColorUtil.alpha(theme.panelColor(), (int) (215 * t)));
-        GfxEngine.outline(g, cardX, cardY, cardW, cardH, 18, ColorUtil.rgba(255, 255, 255, (int) (30 * t)), 1f);
-        GfxEngine.rounded(g, cardX + 20, cardY + 1, cardW - 40, 1, 0.5f, ColorUtil.rgba(255, 255, 255, (int) (26 * t)));
+        // стеклянная карточка: база + светлый градиент-блик + обводка
+        GfxEngine.rounded(g, cardX, cardY, cardW, cardH, 18,
+                ColorUtil.alpha(theme.panelColor(), (int) (ColorUtil.alphaI(theme.panelColor()) * t)));
+        GfxEngine.roundedGradient(g, cardX, cardY, cardW, cardH, 18,
+                ColorUtil.rgba(255, 255, 255, (int) (26 * t)), ColorUtil.rgba(255, 255, 255, (int) (4 * t)));
+        GfxEngine.outline(g, cardX, cardY, cardW, cardH, 18, ColorUtil.rgba(255, 255, 255, (int) (44 * t)), 1f);
+        GfxEngine.rounded(g, cardX + 20, cardY + 1, cardW - 40, 1, 0.5f, ColorUtil.rgba(255, 255, 255, (int) (70 * t)));
 
         // логотип и линия-акцент под ним
         int lx = this.width / 2 - logoW / 2 - (int) ((1 - t) * 14);
@@ -292,17 +296,35 @@ public class AuroraTitleScreen extends Screen {
         hoverAnim.to(hover ? 1 : 0);
         float hv = hoverAnim.update();
 
-        int fill = ColorUtil.lerp(ColorUtil.rgba(255, 255, 255, 12), ColorUtil.rgba(255, 255, 255, 30), hv);
-        GfxEngine.rounded(g, x, by, w, h, h / 2f, ColorUtil.alpha(fill, (int) (ColorUtil.alphaI(fill) * appearT)));
-        GfxEngine.outline(g, x, by, w, h, h / 2f, ColorUtil.lerp(
-                ColorUtil.rgba(255, 255, 255, (int) (30 * appearT)),
-                ColorUtil.alpha(theme.accentNow(), 190), hv), 1f);
+        // кнопка мягко увеличивается при наведении
+        g.pose().pushMatrix();
+        float scb = 1f + 0.018f * hv;
+        g.pose().translate(x + w / 2f, by + h / 2f);
+        g.pose().scale(scb, scb);
+        g.pose().translate(-(x + w / 2f), -(by + h / 2f));
 
-        // акцентная полоска слева при наведении
-        if (hv > 0.02f) {
-            GfxEngine.rounded(g, x + 12, by + h / 2f - 5, 3, 10, 1.5f,
-                    ColorUtil.alpha(theme.accentNow(), (int) (220 * hv)));
+        // акцентное свечение под кнопкой при наведении
+        if (hv > 0.05f) {
+            GfxEngine.glow(g, x, by, w, h, h / 2f, 9f,
+                    ColorUtil.alpha(theme.accentNow(), (int) (60 * hv)));
         }
+
+        // стеклянная кнопка: полупрозрачная база + блик-градиент + обводка
+        int baseA = (int) (110 * bt);
+        int hoverA = (int) (150 * hv);
+        GfxEngine.rounded(g, x, by, w, h, h / 2f,
+                ColorUtil.lerp(ColorUtil.rgba(12, 14, 22, baseA), ColorUtil.rgba(18, 20, 32, hoverA), hv));
+        GfxEngine.roundedGradient(g, x, by, w, h, h / 2f,
+                ColorUtil.rgba(255, 255, 255, (int) (18 * bt)), ColorUtil.rgba(255, 255, 255, (int) (3 * bt)));
+        GfxEngine.outline(g, x, by, w, h, h / 2f, ColorUtil.lerp(
+                ColorUtil.rgba(255, 255, 255, (int) (40 * bt)),
+                ColorUtil.alpha(theme.accentNow(), 200), hv), 1f);
+        // светлая кромка сверху
+        float inset = Math.min(h / 2f, w / 2f);
+        GfxEngine.rounded(g, x + inset, by + 1, Math.max(2, w - inset * 2), 1, 0.5f,
+                ColorUtil.rgba(255, 255, 255, (int) (46 * bt)));
+
+        g.pose().popMatrix();
 
         final int fby = by;
         if (bt > 0.9f) {
@@ -323,8 +345,22 @@ public class AuroraTitleScreen extends Screen {
         }
         float hv = hoverAnims.get(index).get();
         int textColor = ColorUtil.lerp(theme.textPrimary(), ColorUtil.rgb(255, 255, 255), hv);
+
+        // тот же hover-масштаб, что у формы — текст не отходит от кнопки
+        g.pose().pushMatrix();
+        float scb = 1f + 0.018f * hv;
+        g.pose().translate(x + w / 2f, by + h / 2f);
+        g.pose().scale(scb, scb);
+        g.pose().translate(-(x + w / 2f), -(by + h / 2f));
         RenderUtil.drawCenteredText(g, font, BUTTONS[index], x + w / 2f, by + h / 2f - RenderUtil.fontHeight(font) / 2f + 1,
                 ColorUtil.alpha(textColor, alpha), theme);
+        // стрелка-шеврон слева: раньше тут была «каретка»-полоска, которую
+        // можно было спутать с текстовым курсором
+        if (hv > 0.03f) {
+            RenderUtil.drawText(g, font, "›", x + 14, by + h / 2f - RenderUtil.fontHeight(font) / 2f + 1,
+                    ColorUtil.alpha(theme.accentNow(), (int) (230 * hv)), theme);
+        }
+        g.pose().popMatrix();
         return y + h + gap;
     }
 
@@ -348,8 +384,9 @@ public class AuroraTitleScreen extends Screen {
         Animation hoverAnim = hoverAnims.get(animIndex);
         hoverAnim.to(hover ? 1 : 0);
         float hv = hoverAnim.update();
-        int fill = ColorUtil.lerp(ColorUtil.rgba(255, 255, 255, 14), ColorUtil.alpha(theme.accentNow(), 90), hv);
-        GfxEngine.rounded(g, bx, y, tw, 20, 10, fill);
+        int fill = ColorUtil.lerp(ColorUtil.rgba(255, 255, 255, 16), ColorUtil.alpha(theme.accentNow(), 110), hv);
+        RenderUtil.glassChip(g, bx, y, tw, 20, 10, fill,
+                hover ? ColorUtil.alpha(theme.accentNow(), 180) : ColorUtil.rgba(255, 255, 255, 34), theme);
         hits.add(new Hit(bx, y, tw, 20, action));
         return bx - 8;
     }

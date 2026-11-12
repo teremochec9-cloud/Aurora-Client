@@ -97,16 +97,20 @@ public final class RenderUtil {
     /* ------------------------------------------------------------------ */
 
     /**
-     * Стеклянная панель: мягкая тень, тёмная подложка, обводка 1px
-     * и тонкий блик по верхней кромке.
+     * Стеклянная панель (glassmorphism): мягкая тень, полупрозрачная тёмная
+     * база, светлый вертикальный градиент-блик, обводка 1px и тонкий кант
+     * по верхней кромке. Сквозь панель просвечивает размытый фон.
      */
     public static void glassPanel(GuiGraphics g, float x, float y, float w, float h, float r, Theme theme) {
-        softShadow(g, x, y, w, h, r, 110);
+        softShadow(g, x, y, w, h, r, 120);
         GfxEngine.rounded(g, x, y, w, h, r, theme.panelColor());
-        GfxEngine.outline(g, x, y, w, h, r, theme.borderColor(), 1f);
+        // светлое «стекло»: градиент от верхней кромки вниз
+        GfxEngine.roundedGradient(g, x, y, w, h, r,
+                ColorUtil.rgba(255, 255, 255, 24), ColorUtil.rgba(255, 255, 255, 3));
+        GfxEngine.outline(g, x, y, w, h, r, theme.glassBorder(), 1f);
         // блик
         float inset = Math.min(r + 2, w / 2f);
-        GfxEngine.rounded(g, x + inset, y + 1, w - inset * 2, 1, 0.5f, ColorUtil.rgba(255, 255, 255, 20));
+        GfxEngine.rounded(g, x + inset, y + 1, w - inset * 2, 1, 0.5f, theme.glassHighlight());
     }
 
     public static void glassPanel(GuiGraphics g, int x, int y, int w, int h, int r, Theme theme) {
@@ -114,20 +118,34 @@ public final class RenderUtil {
     }
 
     /**
-     * Стеклянная капсула HUD-элемента: тень, тёмная полупрозрачная подложка,
-     * обводка. Без лишних полосок — чистое стекло в цвет темы.
+     * Стеклянная капсула HUD-элемента: тень, полупрозрачная база,
+     * мягкий градиент-блик и обводка — чистое стекло в цвет темы.
      */
     public static void glassCapsule(GuiGraphics g, float x, float y, float w, float h, float r, Theme theme) {
         softShadow(g, x, y, w, h, r, 70);
-        GfxEngine.rounded(g, x, y, w, h, r,
-                ColorUtil.rgba(10, 11, 18, (int) (theme.backgroundAlpha * 205)));
-        GfxEngine.outline(g, x, y, w, h, r, ColorUtil.rgba(255, 255, 255, 30), 1f);
+        GfxEngine.rounded(g, x, y, w, h, r, theme.hudGlassColor());
+        GfxEngine.roundedGradient(g, x, y, w, h, r,
+                ColorUtil.rgba(255, 255, 255, 16), ColorUtil.rgba(255, 255, 255, 3));
+        GfxEngine.outline(g, x, y, w, h, r, ColorUtil.rgba(255, 255, 255, 36), 1f);
         float inset = Math.min(r + 1, w / 2f);
-        GfxEngine.rounded(g, x + inset, y + 0.5f, w - inset * 2, 1, 0.5f, ColorUtil.rgba(255, 255, 255, 14));
+        GfxEngine.rounded(g, x + inset, y + 0.5f, w - inset * 2, 1, 0.5f, ColorUtil.rgba(255, 255, 255, 40));
     }
 
     public static void glassCapsule(GuiGraphics g, int x, int y, int w, int h, int r, Theme theme) {
         glassCapsule(g, (float) x, (float) y, (float) w, (float) h, (float) r, theme);
+    }
+
+    /**
+     * Маленькая стеклянная кнопка/плашка: полупрозрачная база,
+     * градиент-блик и обводка. color2 управляет обводкой (акцент при наведении).
+     */
+    public static void glassChip(GuiGraphics g, float x, float y, float w, float h, float r, int base, int border, Theme theme) {
+        GfxEngine.rounded(g, x, y, w, h, r, base);
+        GfxEngine.roundedGradient(g, x, y, w, h, r,
+                ColorUtil.rgba(255, 255, 255, 18), ColorUtil.rgba(255, 255, 255, 2));
+        GfxEngine.outline(g, x, y, w, h, r, border, 1f);
+        float inset = Math.min(r + 1, w / 2f);
+        GfxEngine.rounded(g, x + inset, y + 0.5f, w - inset * 2, 1, 0.5f, ColorUtil.rgba(255, 255, 255, 36));
     }
 
     /* ------------------------------------------------------------------ */

@@ -45,6 +45,12 @@ public class Animation {
         return value;
     }
 
+    /** Задаёт цель и сразу пересчитывает значение — для однопроходного рендера. */
+    public float apply(float target) {
+        to(target);
+        return update();
+    }
+
     public float get() {
         return value;
     }

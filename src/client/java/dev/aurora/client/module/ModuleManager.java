@@ -6,6 +6,7 @@ import dev.aurora.client.module.modules.CustomCrosshairModule;
 import dev.aurora.client.module.modules.FullbrightModule;
 import dev.aurora.client.module.modules.LowFireModule;
 import dev.aurora.client.module.modules.NoHurtCamModule;
+import dev.aurora.client.module.modules.TargetEspModule;
 import dev.aurora.client.module.modules.ZoomModule;
 import dev.aurora.client.hud.ClockHud;
 import dev.aurora.client.hud.CoordsHud;
@@ -33,6 +34,7 @@ public class ModuleManager {
         register(new LowFireModule());
         register(new CleanHudModule());
         register(new CustomCrosshairModule());
+        register(new TargetEspModule());
         // HUD
         register(new WatermarkHud());
         register(new FpsHud());

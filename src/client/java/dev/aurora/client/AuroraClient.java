@@ -9,10 +9,15 @@ import dev.aurora.client.hud.HudModule;
 import dev.aurora.client.module.Category;
 import dev.aurora.client.module.Module;
 import dev.aurora.client.module.ModuleManager;
+import dev.aurora.client.module.modules.ChatModule;
 import dev.aurora.client.module.modules.CleanHudModule;
 import dev.aurora.client.module.modules.CustomCrosshairModule;
+import dev.aurora.client.module.modules.TargetEspModule;
+import dev.aurora.client.profile.ProfileManager;
 import dev.aurora.client.theme.Theme;
+import dev.aurora.client.util.Animation;
 import dev.aurora.client.util.ColorUtil;
+import dev.aurora.client.util.GfxEngine;
 import dev.aurora.client.util.RenderUtil;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
@@ -39,8 +44,19 @@ public class AuroraClient implements ClientModInitializer {
     private static final boolean TEST_GUI = "1".equals(System.getenv("AURORA_TEST_GUI"));
     /** Смоук-тест: вместо ClickGUI открыть HUD-редактор (AURORA_TEST_HUD=1). */
     private static final boolean TEST_HUD = "1".equals(System.getenv("AURORA_TEST_HUD"));
+
+    /** Доступ смоук-харнессу: логировать ли bbox-ассерты HUD. */
+    public static boolean isTestHud() {
+        return TEST_HUD;
+    }
     /** Смоук-тест: сразу открыть вкладку «Тема» (AURORA_TEST_THEME=1). */
     private static final boolean TEST_THEME = "1".equals(System.getenv("AURORA_TEST_THEME"));
+    /** Смоук-тест: проверить «прозрачный фон» чата (AURORA_TEST_CHAT=1) — лог значений опций. */
+    private static final boolean TEST_CHAT = "1".equals(System.getenv("AURORA_TEST_CHAT"));
+    /** Смоук-тест Target ESP: в мире включить ESP и призвать цель (AURORA_TEST_ESP=1). */
+    private static final boolean TEST_ESP = "1".equals(System.getenv("AURORA_TEST_ESP"));
+    private boolean chatTestDone;
+    private boolean espTestDone;
     private boolean themeTabOpened;
     private int titleTicks;
 
@@ -59,11 +75,22 @@ public class AuroraClient implements ClientModInitializer {
                 Identifier.fromNamespaceAndPath("aurora", "hud_layer"),
                 AuroraClient::renderHudLayer);
 
+        // ===== Слой Target ESP: подсветка целей поверх HUD =====
+        HudElementRegistry.attachElementAfter(
+                Identifier.fromNamespaceAndPath("aurora", "hud_layer"),
+                Identifier.fromNamespaceAndPath("aurora", "target_esp_layer"),
+                AuroraClient::renderTargetEspLayer);
+
         // ===== Подмена ванильных элементов (чистый интерфейс, прицел) =====
         registerHiders();
 
         // ===== Тик: хоткей меню, модули, отложенное сохранение конфига =====
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
+            // кламп HUD к границам экрана (один раз, когда окно готово);
+            // здесь же логируется миграция конфига v1→v2
+            AuroraConfig.clampAllHud();
+            // отложенный никнейм из конфига: применяем, как только игра готова
+            ProfileManager.applyPending();
             ModuleManager.tick();
             AuroraConfig.tick();
             // хоткей меню: срабатывает на переход «отпущена → нажата»,
@@ -103,6 +130,38 @@ public class AuroraClient implements ClientModInitializer {
                 gui.debugOpenThemeTab();
                 themeTabOpened = true;
             }
+            // смоук-тест чата: включаем «прозрачный фон» и пишем обе опции в лог
+            if (TEST_CHAT && !chatTestDone && client.player == null && client.screen != null) {
+                chatTestDone = true;
+                ChatModule chat = ModuleManager.get(ChatModule.class);
+                if (chat != null) {
+                    chat.transparentBg.set(true);
+                    chat.setEnabled(true); // вызовет onEnable → apply()
+                    client.execute(() -> org.slf4j.LoggerFactory.getLogger("Aurora/Test")
+                            .info("AURORA_CHAT_TEST: chatOpacity={} textBackgroundOpacity={} (ожидалось: текст {}, фон 0.0)",
+                                    client.options.chatOpacity().get(),
+                                    client.options.textBackgroundOpacity().get(),
+                                    client.options.chatOpacity().get()));
+                }
+            }
+            // смоук-тест Target ESP: в мире включаем модуль, разворачиваем камеру
+            // чуть вниз и призываем паука (не горит на солнце) перед собой с NoAI
+            if (TEST_ESP && !espTestDone && client.player != null && client.level != null) {
+                espTestDone = true;
+                TargetEspModule esp = ModuleManager.get(TargetEspModule.class);
+                if (esp != null) {
+                    esp.setEnabled(true);
+                    esp.mode.setIndex(1);       // «Ближайшие»
+                    esp.playersOnly.set(false); // паук тоже цель
+                    esp.range.set(24f);
+                    AuroraConfig.save();
+                    client.player.connection.sendCommand("tp @s ~ ~ ~ 0 12");
+                    client.execute(() -> {
+                        client.player.connection.sendCommand("summon spider ~2 ~ ~5 {NoAI:1b}");
+                        org.slf4j.LoggerFactory.getLogger("Aurora/Test").info("AURORA_ESP_TEST: цель призвана");
+                    });
+                }
+            }
         });
 
         // ===== Красивое главное меню =====
@@ -116,8 +175,11 @@ public class AuroraClient implements ClientModInitializer {
             }
         });
 
-        // ===== Сохранение при выходе =====
-        ClientLifecycleEvents.CLIENT_STOPPING.register(client -> AuroraConfig.save());
+        // ===== Сохранение при выходе (включая возврат ванильной опции блюра) =====
+        ClientLifecycleEvents.CLIENT_STOPPING.register(client -> {
+            AuroraConfig.releaseVanillaBlurControl();
+            AuroraConfig.save();
+        });
     }
 
     /* Состояние «клавиша уже была нажата в прошлом тике» для антидребезга. */
@@ -189,31 +251,52 @@ public class AuroraClient implements ClientModInitializer {
         }
     }
 
-    /** Кастомный прицел: точка/круг/крест. */
+    /** Кастомный прицел: гладкие NanoVG-формы с анимацией включения. */
     private static void drawCustomCrosshair(GuiGraphics g, CustomCrosshairModule m) {
-        int cx = g.guiWidth() / 2;
-        int cy = g.guiHeight() / 2;
-        int color = m.color.get();
+        // плавный выезд при включении/отключении
+        float t = Animation.smooth(Math.max(0f, Math.min(1f, m.appear.apply(m.isEnabled() ? 1f : 0f))));
+        if (t < 0.02f) {
+            return;
+        }
+        float cx = g.guiWidth() / 2f;
+        float cy = g.guiHeight() / 2f;
+        int color = ColorUtil.alpha(m.color.get(), Math.round(255f * t));
         String style = m.style.get();
-        if (style.equals("Точка") || style.equals("Точка + круг")) {
-            g.fill(cx - 1, cy - 1, cx + 1, cy + 1, color);
-        }
-        if (style.equals("Круг") || style.equals("Точка + круг")) {
-            int r = 6;
-            for (int i = 0; i < 16; i++) {
-                double a = Math.PI * 2 * i / 16;
-                int px = cx + (int) Math.round(Math.cos(a) * r);
-                int py = cy + (int) Math.round(Math.sin(a) * r);
-                g.fill(px, py, px + 1, py + 1, color);
+        boolean withGlow = m.glow.get();
+        float s = 0.6f + 0.4f * Animation.easeOutBack(t); // масштаб при появлении
+
+        boolean dot = style.equals("Точка") || style.equals("Точка + круг");
+        boolean ring = style.equals("Круг") || style.equals("Точка + круг");
+        boolean cross = style.equals("Крест");
+
+        if (dot) {
+            float d = 3.2f * s;
+            if (withGlow) {
+                GfxEngine.glow(g, cx - d, cy - d, d * 2, d * 2, d, 3f, ColorUtil.alpha(m.color.get(), (int) (120 * t)));
             }
+            GfxEngine.circle(g, cx, cy, d, color);
         }
-        if (style.equals("Крест")) {
-            int arm = 4;
-            int gap = 2;
-            g.fill(cx - 1, cy - gap - arm, cx, cy - gap, color); // вверх
-            g.fill(cx, cy + gap, cx + 1, cy + gap + arm, color); // вниз
-            g.fill(cx - gap - arm, cy - 1, cx - gap, cy, color); // влево
-            g.fill(cx + gap, cy, cx + gap + arm, cy + 1, color); // вправо
+        if (ring) {
+            float d = 11f * s;
+            if (withGlow) {
+                GfxEngine.glow(g, cx - d, cy - d, d * 2, d * 2, d, 4f, ColorUtil.alpha(m.color.get(), (int) (80 * t)));
+            }
+            GfxEngine.ring(g, cx, cy, d, color, 1.6f);
+        }
+        if (cross) {
+            float gap = 2.8f * s;
+            float len = 7f * s;
+            float th = 1.7f;
+            if (withGlow) {
+                float ext = gap + len;
+                GfxEngine.glow(g, cx - ext, cy - ext, ext * 2, ext * 2, 3f, 5f,
+                        ColorUtil.alpha(m.color.get(), (int) (90 * t)));
+            }
+            // четыре скруглённых луча — никаких «лесенок» из пиксельных fill
+            GfxEngine.rounded(g, cx - th / 2f, cy - gap - len, th, len, th / 2f, color); // вверх
+            GfxEngine.rounded(g, cx - th / 2f, cy + gap, th, len, th / 2f, color);     // вниз
+            GfxEngine.rounded(g, cx - gap - len, cy - th / 2f, len, th, th / 2f, color); // влево
+            GfxEngine.rounded(g, cx + gap, cy - th / 2f, len, th, th / 2f, color);     // вправо
         }
     }
 
@@ -234,6 +317,23 @@ public class AuroraClient implements ClientModInitializer {
                     e.printStackTrace();
                 }
             }
+        }
+    }
+
+    /** Рендер слоя Target ESP (проекция целей на экран). */
+    private static void renderTargetEspLayer(GuiGraphics g, DeltaTracker t) {
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.options == null || mc.options.hideGui || mc.player == null || mc.level == null) {
+            return;
+        }
+        TargetEspModule esp = ModuleManager.get(TargetEspModule.class);
+        if (esp == null || !esp.isEnabled()) {
+            return;
+        }
+        try {
+            esp.renderTargets(g, t, THEME, mc);
+        } catch (Exception e) {
+            e.printStackTrace();
         }
     }
 }

@@ -7,13 +7,18 @@ import net.minecraft.client.Minecraft;
 
 /**
  * Улучшения чата: сообщения не затухают, прозрачный фон, копирование.
+ *
+ * <p>«Прозрачный фон» управляет ванильной опцией textBackgroundOpacity —
+ * она отвечает именно за подложку сообщений. Раньше мы зануляли
+ * chatOpacity, а она влияет на сам ТЕКСТ: при открытом чате буквы
+ * становились невидимыми. Теперь текст всегда виден, пропадает только фон.</p>
  */
 public class ChatModule extends Module {
     public final BooleanSetting noFade = new BooleanSetting("Без затухания", true, "Сообщения не исчезают со временем");
-    public final BooleanSetting transparentBg = new BooleanSetting("Прозрачный фон", false, "Убирает тёмный фон чата");
+    public final BooleanSetting transparentBg = new BooleanSetting("Прозрачный фон", false, "Убирает тёмную подложку чата, текст остаётся видимым");
     public final BooleanSetting ctrlCopy = new BooleanSetting("Ctrl+C — копировать", true, "В чате копирует последнее сообщение");
 
-    private Double previousOpacity;
+    private Double previousBackgroundOpacity;
     private boolean pending = false;
 
     public ChatModule() {
@@ -37,18 +42,25 @@ public class ChatModule extends Module {
             pending = true;
             return;
         }
-        if (transparentBg.get() && previousOpacity == null) {
-            previousOpacity = (Double) mc.options.chatOpacity().get();
-            mc.options.chatOpacity().set(0.0);
+        if (transparentBg.get() && previousBackgroundOpacity == null) {
+            try {
+                previousBackgroundOpacity = (Double) mc.options.textBackgroundOpacity().get();
+                mc.options.textBackgroundOpacity().set(0.0);
+            } catch (Exception e) {
+                previousBackgroundOpacity = null;
+            }
         }
     }
 
     private void restore() {
         pending = false;
         Minecraft mc = Minecraft.getInstance();
-        if (mc.options != null && previousOpacity != null) {
-            mc.options.chatOpacity().set(previousOpacity);
-            previousOpacity = null;
+        if (mc.options != null && previousBackgroundOpacity != null) {
+            try {
+                mc.options.textBackgroundOpacity().set(previousBackgroundOpacity);
+            } catch (Exception ignored) {
+            }
+            previousBackgroundOpacity = null;
         }
     }
 
@@ -57,7 +69,7 @@ public class ChatModule extends Module {
         if (pending) {
             pending = false;
             apply();
-        } else if (isEnabled() && transparentBg.get() && previousOpacity == null) {
+        } else if (isEnabled() && transparentBg.get() && previousBackgroundOpacity == null) {
             apply();
         }
     }

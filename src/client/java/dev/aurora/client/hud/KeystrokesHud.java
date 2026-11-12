@@ -27,11 +27,11 @@ public class KeystrokesHud extends HudModule {
         anchorY = 1; // центрировать по вертикали относительно точки
     }
 
-    /** Ширина кнопки мыши: по самому длинному ожидаемому тексту. */
+    /** Ширина кнопки мыши: по самому длинному ожидаемому тексту (до 3 цифр CPS). */
     private int mouseW(Font font, Theme theme) {
         int need = Math.max(
-                RenderUtil.width(font, "ЛКМ 00", theme),
-                RenderUtil.width(font, "ПКМ 00", theme));
+                RenderUtil.width(font, "ЛКМ 000", theme),
+                RenderUtil.width(font, "ПКМ 000", theme));
         return Math.max(44, need + 12);
     }
 

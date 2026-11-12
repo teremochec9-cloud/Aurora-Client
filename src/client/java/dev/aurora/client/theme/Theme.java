@@ -15,7 +15,7 @@ import java.nio.file.Path;
  */
 public class Theme {
     public static final String CLIENT_NAME = "Aurora";
-    public static final String CLIENT_VERSION = "1.2.1";
+    public static final String CLIENT_VERSION = "1.0.3";
     public static final String MC_VERSION = "1.21.11";
 
     /** Основной акцентный цвет (по умолчанию — фиолетовый, как на референсе). */
@@ -24,8 +24,8 @@ public class Theme {
     public int accent2 = ColorUtil.rgb(99, 102, 241);
     /** Радужный режим акцента. */
     public boolean rainbow = false;
-    /** Прозрачность панелей (0..1). */
-    public float backgroundAlpha = 0.55f;
+    /** Прозрачность панелей (0..1) — стекло тем прозрачнее, чем меньше значение. */
+    public float backgroundAlpha = 0.45f;
     /** Сила блюра за меню (0..10). */
     public int blurStrength = 10;
     /** Включить блюр за меню. */
@@ -62,11 +62,31 @@ public class Theme {
     }
 
     public int panelColor() {
-        return ColorUtil.alpha(ColorUtil.rgb(17, 18, 27), (int) (backgroundAlpha * 255));
+        return ColorUtil.alpha(ColorUtil.rgb(16, 17, 26), (int) (backgroundAlpha * 255));
+    }
+
+    /** Более прозрачная база для карточек поверх главного окна. */
+    public int cardGlassColor() {
+        return ColorUtil.alpha(ColorUtil.rgb(14, 15, 24), (int) (backgroundAlpha * 175));
+    }
+
+    /** База стеклянных капсул HUD. */
+    public int hudGlassColor() {
+        return ColorUtil.alpha(ColorUtil.rgb(11, 12, 20), (int) (backgroundAlpha * 200));
     }
 
     public int borderColor() {
-        return ColorUtil.rgba(255, 255, 255, 26);
+        return ColorUtil.rgba(255, 255, 255, 38);
+    }
+
+    /** Обводка стеклянных панелей. */
+    public int glassBorder() {
+        return ColorUtil.rgba(255, 255, 255, 42);
+    }
+
+    /** Верхний светлый кант стекла (блик). */
+    public int glassHighlight() {
+        return ColorUtil.rgba(255, 255, 255, 64);
     }
 
     public int textPrimary() {
@@ -86,7 +106,7 @@ public class Theme {
         accent = ColorUtil.rgb(139, 92, 246);
         accent2 = ColorUtil.rgb(99, 102, 241);
         rainbow = false;
-        backgroundAlpha = 0.55f;
+        backgroundAlpha = 0.45f;
         blurStrength = 10;
         blur = true;
         animations = true;

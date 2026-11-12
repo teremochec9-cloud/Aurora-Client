@@ -19,7 +19,18 @@ public class CoordsHud extends HudModule {
     @Override
     public int width() {
         Minecraft mc = Minecraft.getInstance();
-        return RenderUtil.width(mc.font, "XYZ: 00000 / 000 / 00000", theme()) + 10;
+        // из кэша той же строки, что и рендер — капсула всегда вмещает координаты
+        String pos = cached("coords", 100, () -> {
+            if (mc.player != null) {
+                return String.format("%d / %d / %d",
+                        (int) Math.floor(mc.player.getX()),
+                        (int) Math.floor(mc.player.getY()),
+                        (int) Math.floor(mc.player.getZ()));
+            }
+            return "—";
+        });
+        return RenderUtil.width(mc.font, "XYZ: ", theme())
+                + RenderUtil.width(mc.font, pos, theme()) + 10;
     }
 
     @Override

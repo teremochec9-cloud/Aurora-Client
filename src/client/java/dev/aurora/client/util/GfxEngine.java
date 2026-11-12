@@ -164,10 +164,18 @@ public final class GfxEngine {
     private static final int TEXT = 6;
 
     private static final List<Cmd> COMMANDS = new ArrayList<>(512);
+    /** Пул команд: переиспользуем объекты, чтобы не создавать сотни аллокаций в кадр. */
+    private static final ArrayDeque<Cmd> FREE_CMDS = new ArrayDeque<>();
+
+    private static Cmd allocCmd() {
+        Cmd c = FREE_CMDS.pollFirst();
+        return c != null ? c : new Cmd();
+    }
 
     private static final class Cmd {
         int type;
-        Matrix3x2fc pose;
+        /** Переиспользуемая матрица (не выделяем новую на каждую команду). */
+        final Matrix3x2f pose = new Matrix3x2f();
         float sx, sy, sw, sh;   // scissor (или sw <= 0 — без отсечения)
         float x, y, w, h, r;
         float p1, p2;           // sigma / offsetY / thickness / fade
@@ -189,18 +197,22 @@ public final class GfxEngine {
     }
 
     private static Cmd cmd(int type, GuiGraphics g) {
-        Cmd c = new Cmd();
+        Cmd c = allocCmd();
+        c.text = null;
         c.type = type;
-        c.pose = new Matrix3x2f(g.pose());
+        c.pose.set(g.pose());
         float[] s = currentScissor();
         if (s != null) {
             // scissor хранится в сырых gui-координатах: NanoVG сам применит к
             // нему текущую матрицу воспроизведения (поза * guiScale) при
             // отрисовке. Раньше scissor трансформировался дважды — области
             // «уезжали» и текст настроек вылезал за границы карточек
-            c.scissor(new float[]{s[0], s[1], s[2], s[3]});
+            c.sx = s[0];
+            c.sy = s[1];
+            c.sw = s[2];
+            c.sh = s[3];
         } else {
-            c.scissor(null);
+            c.sw = -1; // без отсечения
         }
         COMMANDS.add(c);
         return c;
@@ -412,14 +424,15 @@ public final class GfxEngine {
         if (COMMANDS.isEmpty()) {
             return;
         }
-        List<Cmd> cmds = new ArrayList<>(COMMANDS);
-        COMMANDS.clear();
         if (!ensureReady()) {
+            // команды всё равно надо освободить, чтобы не копить мусор
+            releaseCommands();
             return;
         }
         Minecraft mc = Minecraft.getInstance();
         RenderTarget target = mc.getMainRenderTarget();
         if (target == null || target.width <= 0 || target.height <= 0) {
+            releaseCommands();
             return;
         }
         int guiScale = Math.max(1, mc.getWindow().getGuiScale());
@@ -452,9 +465,9 @@ public final class GfxEngine {
                 int err = GL11.glGetError();
                 LOGGER.info("Aurora: GL error после тестового текста = {}", Integer.toHexString(err));
             }
-            for (int i = 0; i < cmds.size(); i++) {
+            for (int i = 0; i < COMMANDS.size(); i++) {
                 try {
-                    replay(cmds.get(i));
+                    replay(COMMANDS.get(i));
                 } catch (Throwable t) {
                     // одна сломанная команда не должна ронять весь кадр
                 }
@@ -462,6 +475,21 @@ public final class GfxEngine {
             NanoVG.nvgEndFrame(ctx);
         } catch (Throwable t) {
             LOGGER.error("Aurora: сбой отрисовки NanoVG", t);
+        } finally {
+            releaseCommands();
+        }
+    }
+
+    /** Возвращает все команды в пул и очищает буфер кадра. */
+    private static void releaseCommands() {
+        for (int i = 0; i < COMMANDS.size(); i++) {
+            Cmd c = COMMANDS.get(i);
+            c.text = null; // отпускаем ссылку на строку
+            FREE_CMDS.addLast(c);
+        }
+        COMMANDS.clear();
+        if (FREE_CMDS.size() > 4096) {
+            FREE_CMDS.clear(); // страховка от разрастания пула
         }
     }
 

@@ -20,7 +20,11 @@ public class FpsHud extends HudModule {
     @Override
     public int width() {
         Minecraft mc = Minecraft.getInstance();
-        return RenderUtil.width(mc.font, "FPS: 000", theme()) + 10;
+        // из кэша: при fps >= 1000 живое значение шире запасного "FPS: 000"
+        // и текст вылезал за капсулу
+        String fpsStr = cached("fps", 250, () -> String.valueOf(mc.getFps()));
+        return RenderUtil.width(mc.font, "FPS: ", theme())
+                + RenderUtil.width(mc.font, fpsStr, theme()) + 10;
     }
 
     @Override

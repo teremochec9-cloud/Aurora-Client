@@ -3,6 +3,7 @@ package dev.aurora.client.hud;
 import dev.aurora.client.theme.Theme;
 import dev.aurora.client.util.ClickTracker;
 import dev.aurora.client.util.ColorUtil;
+import dev.aurora.client.util.GfxEngine;
 import dev.aurora.client.util.RenderUtil;
 import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.Minecraft;
@@ -22,8 +23,12 @@ public class WatermarkHud extends HudModule {
     @Override
     public int width() {
         Minecraft mc = Minecraft.getInstance();
-        String rest = "  " + mc.getFps() + " fps  " + pingText(mc);
-        return RenderUtil.width(mc.font, Theme.CLIENT_NAME, theme()) + RenderUtil.width(mc.font, rest, theme()) + 10;
+        // ширина капсулы считается из ТОЙ ЖЕ кэшированной строки, что и рендер:
+        // раньше здесь брали живые значения, и при обновлении fps/пинга капсула
+        // на кадр не вмещала текст (текст вылезал за плашку)
+        String rest = cached("wm_rest", 500, () -> mc.getFps() + " fps  " + pingText(mc));
+        return RenderUtil.width(mc.font, Theme.CLIENT_NAME, theme())
+                + RenderUtil.width(mc.font, rest, theme()) + 17;
     }
 
     @Override
@@ -57,7 +62,9 @@ public class WatermarkHud extends HudModule {
     protected void renderContent(GuiGraphics g, Font font, DeltaTracker dt, Theme theme, Minecraft mc) {
         int accentA = theme.accentNow();
         int accentB = theme.accent(1.0f);
-        int x = 6;
+        // акцентная полоска-«искра» слева — фирменный штрих логотипа
+        GfxEngine.roundedGradient(g, 1.5f, 3, 2.5f, 9, 1.25f, accentA, accentB);
+        int x = 8;
         x += RenderUtil.drawGradientText(g, font, Theme.CLIENT_NAME, x, 3, accentA, accentB, theme) + 6;
         String rest = cached("wm_rest", 500, () -> mc.getFps() + " fps  " + pingText(mc));
         RenderUtil.drawText(g, font, rest, x, 3, theme.textSecondary(), theme);

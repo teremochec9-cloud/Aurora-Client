@@ -20,7 +20,13 @@ public class PingHud extends HudModule {
     @Override
     public int width() {
         Minecraft mc = Minecraft.getInstance();
-        return RenderUtil.width(mc.font, "Пинг: 000 ms", theme()) + 10;
+        // из кэша: при пинге >= 1000 ms живое значение шире запасного "000"
+        String value = cached("ping", 500, () -> {
+            int p = WatermarkHud.ping(mc);
+            return p < 0 ? "—" : p + " ms";
+        });
+        return RenderUtil.width(mc.font, "Пинг: ", theme())
+                + RenderUtil.width(mc.font, value, theme()) + 10;
     }
 
     @Override
