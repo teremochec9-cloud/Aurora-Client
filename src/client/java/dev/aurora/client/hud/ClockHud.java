@@ -38,6 +38,7 @@ public class ClockHud extends HudModule {
 
     @Override
     protected void renderContent(GuiGraphics g, Font font, DeltaTracker dt, Theme theme, Minecraft mc) {
-        RenderUtil.drawText(g, font, LocalTime.now().format(FMT), 5, 3, theme.textPrimary(), theme);
+        String time = cached("clock", 1000, () -> LocalTime.now().format(FMT));
+        RenderUtil.drawText(g, font, time, 5, 3, theme.textPrimary(), theme);
     }
 }

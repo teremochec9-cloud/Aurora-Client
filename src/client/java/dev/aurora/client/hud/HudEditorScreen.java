@@ -7,6 +7,7 @@ import dev.aurora.client.module.ModuleManager;
 import dev.aurora.client.theme.Theme;
 import dev.aurora.client.util.Animation;
 import dev.aurora.client.util.ColorUtil;
+import dev.aurora.client.util.GfxEngine;
 import dev.aurora.client.util.RenderUtil;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
@@ -25,6 +26,9 @@ public class HudEditorScreen extends Screen {
     private int mouseX, mouseY;
     private final Animation appear = new Animation(0, 10);
 
+    /** Кнопка «Сбросить позиции» [x, y, w, h]. */
+    private int[] resetBtn;
+
     public HudEditorScreen() {
         super(Component.literal("HUD Editor"));
         this.theme = AuroraClient.theme();
@@ -40,19 +44,13 @@ public class HudEditorScreen extends Screen {
     public void render(GuiGraphics g, int mx, int my, float delta) {
         this.mouseX = mx;
         this.mouseY = my;
-        try {
-            renderBackground(g, mx, my, delta);
-        } catch (IllegalStateException e) {
-            // блюр в этом кадре уже применён другим слоем — просто затемняем
-            g.fill(0, 0, this.width, this.height, 0x8C10101A);
-        }
 
+        // элементы + рамки (формы)
         for (Module m : ModuleManager.all()) {
             if (!(m instanceof HudModule hud)) {
                 continue;
             }
             boolean over = isOver(hud, mx, my);
-            // перетаскивание
             if (dragging == hud) {
                 float nx = (mx - grabDX) / (float) g.guiWidth();
                 float ny = (my - grabDY) / (float) g.guiHeight();
@@ -63,26 +61,97 @@ public class HudEditorScreen extends Screen {
             hud.renderEditorFrame(g, theme, over, dragging == hud);
         }
 
-        // ===== верхняя панель подсказок =====
-        int barH = 26;
-        RenderUtil.glassPanel(g, 8, 8, this.width - 16, barH, 10, theme);
-        String hint = "ЛКМ — перетащить · Колесо — масштаб · ПКМ — фон · ESC — готово";
-        RenderUtil.drawCenteredText(g, font, hint, this.width / 2, 8 + 9, theme.textSecondary(), theme);
+        drawBottomBarShapes(g);
 
-        // заголовок
-        RenderUtil.drawText(g, font, "HUD-редактор", 16, 8 + 9, theme.textPrimary(), theme);
+        g.nextStratum();
 
-        // кнопка сброса
-        String reset = "Сбросить позиции";
-        int rw = RenderUtil.width(font, reset, theme) + 16;
-        int rx = this.width - 16 - rw;
-        boolean hoverReset = mx >= rx && mx <= rx + rw && my >= 10 && my <= 10 + 22;
-        RenderUtil.rounded(g, rx, 10, rw, 22, 11, hoverReset ? ColorUtil.alpha(theme.accentNow(), 90) : ColorUtil.rgba(255, 255, 255, 16));
-        RenderUtil.drawText(g, font, reset, rx + 8, 10 + 7, hoverReset ? ColorUtil.rgb(255, 255, 255) : theme.textSecondary(), theme);
-        resetBtn = new int[]{rx, 10, rw, 22};
+        drawBottomBarTexts(g);
     }
 
-    private int[] resetBtn;
+    /* ------------------------------------------------------------------ */
+    /*  Нижняя панель подсказок: ширина подобрана так, чтобы весь текст   */
+    /*  помещался целиком — без обрезки троеточием                        */
+    /* ------------------------------------------------------------------ */
+
+    private static final String HINT_FULL = "ЛКМ — перетащить · Колесо — масштаб · ПКМ — фон · ESC — готово";
+    private static final String HINT_SHORT = "ЛКМ — тянуть · Колесо — размер · ПКМ — фон · ESC";
+
+    private void drawBottomBarShapes(GuiGraphics g) {
+        float at = Animation.smooth(appear.get());
+        String hint = chooseHint();
+        int barH = 28;
+        int pad = 10;
+
+        int titleW = RenderUtil.widthBold(font, "HUD-редактор", theme);
+        int hintW = RenderUtil.width(font, hint, theme);
+        String reset = "Сбросить позиции";
+        int rw = RenderUtil.width(font, reset, theme) + 18;
+
+        int contentW = titleW + 16 + hintW + 14 + rw;
+        int barW = Math.min(this.width - 16, contentW + pad * 2);
+        int barX = (this.width - barW) / 2;
+        int barY = this.height - barH - 8;
+
+        int alpha = (int) (255 * at);
+        RenderUtil.softShadow(g, barX, barY, barW, barH, 10, (int) (110 * at));
+        GfxEngine.rounded(g, barX, barY, barW, barH, 10, ColorUtil.alpha(theme.panelColor(), (int) (235 * at)));
+        GfxEngine.outline(g, barX, barY, barW, barH, 10, ColorUtil.rgba(255, 255, 255, (int) (26 * at)), 1f);
+
+        // кнопка сброса
+        int rx = barX + barW - pad - rw;
+        boolean hoverReset = mouseX >= rx && mouseX <= rx + rw && mouseY >= barY && mouseY <= barY + barH;
+        GfxEngine.rounded(g, rx, barY + 3, rw, barH - 6, 9,
+                hoverReset ? ColorUtil.alpha(theme.accentNow(), 150) : ColorUtil.rgba(255, 255, 255, (int) (18 * at)));
+        resetBtn = new int[]{rx, barY, rw, barH};
+    }
+
+    private void drawBottomBarTexts(GuiGraphics g) {
+        float at = Animation.smooth(appear.get());
+        String hint = chooseHint();
+        int barH = 28;
+        int pad = 10;
+
+        int titleW = RenderUtil.widthBold(font, "HUD-редактор", theme);
+        String reset = "Сбросить позиции";
+        int rw = RenderUtil.width(font, reset, theme) + 18;
+        int hintW = RenderUtil.width(font, hint, theme);
+        int barW = Math.min(this.width - 16, titleW + 16 + hintW + 14 + rw + pad * 2);
+        int barX = (this.width - barW) / 2;
+        int barY = this.height - barH - 8;
+
+        int textY = barY + barH / 2 - RenderUtil.fontHeight(font) / 2 + 1;
+        RenderUtil.drawTextBold(g, font, "HUD-редактор", barX + pad, textY, theme.textPrimary(), theme);
+        RenderUtil.drawText(g, font, hint, barX + pad + titleW + 16, textY,
+                ColorUtil.alpha(theme.textSecondary(), (int) (255 * at)), theme);
+
+        int rx = barX + barW - pad - rw;
+        boolean hoverReset = mouseX >= rx && mouseX <= rx + rw && mouseY >= barY && mouseY <= barY + barH;
+        RenderUtil.drawText(g, font, reset, rx + 9, textY,
+                hoverReset ? ColorUtil.rgb(255, 255, 255) : theme.textSecondary(), theme);
+    }
+
+    /** Подбирает подсказку, которая гарантированно помещается в панель. */
+    private String chooseHint() {
+        int titleW = RenderUtil.widthBold(font, "HUD-редактор", theme);
+        int rw = RenderUtil.width(font, "Сбросить позиции", theme) + 18;
+        int available = this.width - 16 - 20 /* паддинги */ - titleW - 16 - 14 - rw;
+        if (RenderUtil.width(font, HINT_FULL, theme) <= available) {
+            return HINT_FULL;
+        }
+        return HINT_SHORT;
+    }
+
+    /** Фон редактора: настоящий блюр + затемнение (ровно 1 раз за кадр). */
+    @Override
+    public void renderBackground(GuiGraphics g, int mx, int my, float delta) {
+        try {
+            renderBlurredBackground(g);
+        } catch (IllegalStateException e) {
+            // блюр в этом кадре уже занят другим слоем — просто затемняем
+        }
+        g.fillGradient(0, 0, this.width, this.height,
+                ColorUtil.rgba(9, 10, 16, 120), ColorUtil.rgba(8, 9, 14, 155));
+    }
 
     private void resetPositions() {
         for (Module m : ModuleManager.all()) {
@@ -108,11 +177,11 @@ public class HudEditorScreen extends Screen {
 
     private float defaultY(HudModule hud) {
         if (hud instanceof WatermarkHud) return 0.005f;
-        if (hud instanceof FpsHud) return 0.048f;
-        if (hud instanceof PingHud) return 0.091f;
-        if (hud instanceof CoordsHud) return 0.134f;
-        if (hud instanceof CpsHud) return 0.177f;
-        if (hud instanceof KeystrokesHud) return 0.5f;
+        if (hud instanceof FpsHud) return 0.075f;
+        if (hud instanceof PingHud) return 0.150f;
+        if (hud instanceof CoordsHud) return 0.225f;
+        if (hud instanceof CpsHud) return 0.300f;
+        if (hud instanceof KeystrokesHud) return 0.55f;
         if (hud instanceof DirectionHud) return 0.005f;
         if (hud instanceof ClockHud) return 0.005f;
         return hud.y;
@@ -159,7 +228,7 @@ public class HudEditorScreen extends Screen {
     @Override
     public boolean mouseReleased(MouseButtonEvent e) {
         if (dragging != null) {
-            AuroraConfig.save();
+            AuroraConfig.markDirty();
         }
         dragging = null;
         return super.mouseReleased(e);

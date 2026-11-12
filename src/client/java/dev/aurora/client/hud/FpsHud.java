@@ -14,7 +14,7 @@ import net.minecraft.client.gui.GuiGraphics;
 public class FpsHud extends HudModule {
 
     public FpsHud() {
-        super("FPS", "Количество кадров в секунду", 0.005f, 0.048f);
+        super("FPS", "Количество кадров в секунду", 0.005f, 0.075f);
     }
 
     @Override
@@ -34,9 +34,10 @@ public class FpsHud extends HudModule {
 
     @Override
     protected void renderContent(GuiGraphics g, Font font, DeltaTracker dt, Theme theme, Minecraft mc) {
+        String fpsStr = cached("fps", 250, () -> String.valueOf(mc.getFps()));
         int fps = mc.getFps();
         int color = fps >= 120 ? ColorUtil.rgb(134, 239, 172) : fps >= 60 ? theme.textPrimary() : ColorUtil.rgb(252, 165, 165);
         RenderUtil.drawText(g, font, "FPS: ", 5, 3, theme.textSecondary(), theme);
-        RenderUtil.drawText(g, font, String.valueOf(fps), 5 + RenderUtil.width(font, "FPS: ", theme), 3, color, theme);
+        RenderUtil.drawText(g, font, fpsStr, 5 + RenderUtil.width(font, "FPS: ", theme), 3, color, theme);
     }
 }

@@ -21,6 +21,11 @@ public final class ColorUtil {
         return (color & 0x00FFFFFF) | ((alpha & 0xFF) << 24);
     }
 
+    /** Альфа-канал цвета (0..255). */
+    public static int alphaI(int color) {
+        return (color >>> 24) & 0xFF;
+    }
+
     /** Смешивает два ARGB-цвета (t=0 — colorA, t=1 — colorB). */
     public static int lerp(int colorA, int colorB, float t) {
         t = Math.max(0.0f, Math.min(1.0f, t));

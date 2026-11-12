@@ -30,6 +30,22 @@ dependencies {
 
         // Fabric API — обязательная зависимость
         modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+
+        // ===== NanoVG: векторный рендер-движок Aurora =====
+        // В dev — обычная зависимость (нативы подтягиваются с classpath).
+        implementation "org.lwjgl:lwjgl-nanovg:${project.lwjgl_nanovg_version}"
+        runtimeOnly "org.lwjgl:lwjgl-nanovg:${project.lwjgl_nanovg_version}:natives-linux"
+        runtimeOnly "org.lwjgl:lwjgl-nanovg:${project.lwjgl_nanovg_version}:natives-windows"
+        runtimeOnly "org.lwjgl:lwjgl-nanovg:${project.lwjgl_nanovg_version}:natives-windows-arm64"
+        runtimeOnly "org.lwjgl:lwjgl-nanovg:${project.lwjgl_nanovg_version}:natives-macos"
+        runtimeOnly "org.lwjgl:lwjgl-nanovg:${project.lwjgl_nanovg_version}:natives-macos-arm64"
+        // В готовый jar библиотека и нативы пакуются через jar-in-jar.
+        include "org.lwjgl:lwjgl-nanovg:${project.lwjgl_nanovg_version}"
+        include "org.lwjgl:lwjgl-nanovg:${project.lwjgl_nanovg_version}:natives-linux"
+        include "org.lwjgl:lwjgl-nanovg:${project.lwjgl_nanovg_version}:natives-windows"
+        include "org.lwjgl:lwjgl-nanovg:${project.lwjgl_nanovg_version}:natives-windows-arm64"
+        include "org.lwjgl:lwjgl-nanovg:${project.lwjgl_nanovg_version}:natives-macos"
+        include "org.lwjgl:lwjgl-nanovg:${project.lwjgl_nanovg_version}:natives-macos-arm64"
 }
 
 processResources {

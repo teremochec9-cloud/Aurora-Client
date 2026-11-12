@@ -57,9 +57,9 @@ public class WatermarkHud extends HudModule {
     protected void renderContent(GuiGraphics g, Font font, DeltaTracker dt, Theme theme, Minecraft mc) {
         int accentA = theme.accentNow();
         int accentB = theme.accent(1.0f);
-        int x = 5;
+        int x = 6;
         x += RenderUtil.drawGradientText(g, font, Theme.CLIENT_NAME, x, 3, accentA, accentB, theme) + 6;
-        String rest = mc.getFps() + " fps  " + pingText(mc);
+        String rest = cached("wm_rest", 500, () -> mc.getFps() + " fps  " + pingText(mc));
         RenderUtil.drawText(g, font, rest, x, 3, theme.textSecondary(), theme);
     }
 }

@@ -33,6 +33,13 @@ import net.minecraft.util.Mth;
 public class AuroraClient implements ClientModInitializer {
     private static final Theme THEME = new Theme();
     private static boolean replacingTitle = false;
+    /** Состояние клавиши меню в прошлом тике (антидребезг открытия). */
+    private static boolean menuKeyWasHeld;
+    /** Смоук-тест: автооткрытие ClickGUI (задаётся переменной окружения AURORA_TEST_GUI=1). */
+    private static final boolean TEST_GUI = "1".equals(System.getenv("AURORA_TEST_GUI"));
+    /** Смоук-тест: вместо ClickGUI открыть HUD-редактор (AURORA_TEST_HUD=1). */
+    private static final boolean TEST_HUD = "1".equals(System.getenv("AURORA_TEST_HUD"));
+    private int titleTicks;
 
     public static Theme theme() {
         return THEME;
@@ -52,13 +59,20 @@ public class AuroraClient implements ClientModInitializer {
         // ===== Подмена ванильных элементов (чистый интерфейс, прицел) =====
         registerHiders();
 
-        // ===== Тик: хоткей меню, модули =====
+        // ===== Тик: хоткей меню, модули, отложенное сохранение конфига =====
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             ModuleManager.tick();
+            AuroraConfig.tick();
+            // хоткей меню: срабатывает на переход «отпущена → нажата»,
+            // поэтому удержание не открывает меню повторно после закрытия
             if (client.screen == null && client.player != null && client.level != null) {
-                if (InputConstants.isKeyDown(client.getWindow(), THEME.menuKey)) {
+                boolean held = InputConstants.isKeyDown(client.getWindow(), THEME.menuKey);
+                if (held && !menuKeyWasHeld) {
                     client.setScreen(new AuroraClickGui());
                 }
+                menuKeyWasHeld = held;
+            } else {
+                menuKeyWasHeld = false;
             }
             // хоткеи модулей
             if (client.screen == null && client.player != null) {
@@ -68,10 +82,17 @@ public class AuroraClient implements ClientModInitializer {
                         if (!wasKeyHeld(m)) {
                             m.toggle();
                             AuroraClickGui.playClick();
-                            AuroraConfig.save();
+                            AuroraConfig.markDirty();
                         }
                     }
                     markKeyHeld(m, key != 0 && InputConstants.isKeyDown(client.getWindow(), key));
+                }
+            }
+            // служебный режим смоук-теста: открыть ClickGUI или HUD-редактор
+            if (TEST_GUI && client.screen instanceof AuroraTitleScreen) {
+                if (++titleTicks > 200) {
+                    client.setScreen(TEST_HUD ? new HudEditorScreen() : new AuroraClickGui());
+                    titleTicks = -1000000; // один раз
                 }
             }
         });

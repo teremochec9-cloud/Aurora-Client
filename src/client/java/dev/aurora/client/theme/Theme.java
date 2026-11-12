@@ -15,7 +15,7 @@ import java.nio.file.Path;
  */
 public class Theme {
     public static final String CLIENT_NAME = "Aurora";
-    public static final String CLIENT_VERSION = "1.0";
+    public static final String CLIENT_VERSION = "1.2";
     public static final String MC_VERSION = "1.21.11";
 
     /** Основной акцентный цвет (по умолчанию — фиолетовый, как на референсе). */
@@ -32,9 +32,9 @@ public class Theme {
     public boolean blur = true;
     /** Плавные анимации интерфейса. */
     public boolean animations = true;
-    /** Использовать кастомный шрифт Golos. */
+    /** Использовать кастомный шрифт Inter. */
     public boolean customFont = true;
-    /** Клавиша открытия меню (GLFW-код, по умолчанию правый Shift). */
+    /** Клавиша открытия меню (GLFW-код, по умолчанию — левый Ctrl). */
     public int menuKey = 341;
 
     /** Пресеты акцента: name -> [accent, accent2]. */

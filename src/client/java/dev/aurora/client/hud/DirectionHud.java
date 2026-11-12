@@ -35,12 +35,14 @@ public class DirectionHud extends HudModule {
 
     @Override
     protected void renderContent(GuiGraphics g, Font font, DeltaTracker dt, Theme theme, Minecraft mc) {
-        String text = "—";
-        if (mc.player != null) {
-            float yaw = mc.player.getYRot();
-            int idx = ((int) Math.round(yaw / 45.0f) & 7);
-            text = DIRS[idx] + String.format(" (%+d°)", Math.round(Math.floorMod((int) yaw + 180, 360) - 180));
-        }
+        String text = cached("dir", 100, () -> {
+            if (mc.player != null) {
+                float yaw = mc.player.getYRot();
+                int idx = ((int) Math.round(yaw / 45.0f) & 7);
+                return DIRS[idx] + String.format(" (%+d°)", Math.round(Math.floorMod((int) yaw + 180, 360) - 180));
+            }
+            return "—";
+        });
         RenderUtil.drawText(g, font, text, 5, 3, theme.textPrimary(), theme);
     }
 }

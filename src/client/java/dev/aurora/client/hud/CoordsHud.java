@@ -13,7 +13,7 @@ import net.minecraft.client.gui.GuiGraphics;
 public class CoordsHud extends HudModule {
 
     public CoordsHud() {
-        super("Координаты", "Позиция XYZ", 0.005f, 0.134f);
+        super("Координаты", "Позиция XYZ", 0.005f, 0.225f);
     }
 
     @Override
@@ -33,15 +33,15 @@ public class CoordsHud extends HudModule {
 
     @Override
     protected void renderContent(GuiGraphics g, Font font, DeltaTracker dt, Theme theme, Minecraft mc) {
-        String pos;
-        if (mc.player != null) {
-            pos = String.format("%d / %d / %d",
-                    (int) Math.floor(mc.player.getX()),
-                    (int) Math.floor(mc.player.getY()),
-                    (int) Math.floor(mc.player.getZ()));
-        } else {
-            pos = "—";
-        }
+        String pos = cached("coords", 100, () -> {
+            if (mc.player != null) {
+                return String.format("%d / %d / %d",
+                        (int) Math.floor(mc.player.getX()),
+                        (int) Math.floor(mc.player.getY()),
+                        (int) Math.floor(mc.player.getZ()));
+            }
+            return "—";
+        });
         RenderUtil.drawText(g, font, "XYZ: ", 5, 3, theme.textSecondary(), theme);
         RenderUtil.drawText(g, font, pos, 5 + RenderUtil.width(font, "XYZ: ", theme), 3, theme.textPrimary(), theme);
     }

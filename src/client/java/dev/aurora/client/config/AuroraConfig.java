@@ -25,6 +25,10 @@ import java.nio.file.Path;
  */
 public final class AuroraConfig {
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
+    /** Есть несохранённые изменения. */
+    private static volatile boolean dirty;
+    /** Счётчик тиков для отложенной записи. */
+    private static int dirtyTicks;
 
     private AuroraConfig() {
     }
@@ -33,7 +37,29 @@ public final class AuroraConfig {
         return FabricLoader.getInstance().getConfigDir().resolve("aurora.json");
     }
 
+    /** Помечает конфиг изменённым — запись произойдёт через 2 секунды или при flush(). */
+    public static void markDirty() {
+        dirty = true;
+    }
+
+    /** Немедленная запись, если есть изменения. */
+    public static synchronized void flush() {
+        if (dirty) {
+            save();
+        }
+    }
+
+    /** Вызывается каждый клиентский тик: раз в 2 секунды сбрасывает изменения на диск. */
+    public static void tick() {
+        if (dirty && ++dirtyTicks >= 40) {
+            dirtyTicks = 0;
+            save();
+        }
+    }
+
     public static synchronized void save() {
+        dirty = false;
+        dirtyTicks = 0;
         try {
             JsonObject root = new JsonObject();
             root.add("theme", AuroraClient.theme().save());

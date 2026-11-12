@@ -3,148 +3,242 @@ package dev.aurora.client.util;
 import dev.aurora.client.theme.Theme;
 import net.minecraft.client.gui.Font;
 import net.minecraft.client.gui.GuiGraphics;
-import net.minecraft.network.chat.Component;
-import net.minecraft.network.chat.FontDescription;
-import net.minecraft.network.chat.MutableComponent;
-import net.minecraft.network.chat.Style;
-import net.minecraft.resources.Identifier;
+
+import java.util.ArrayList;
+import java.util.List;
 
 /**
- * Утилиты отрисовки: скруглённые панели, градиенты, свечение, текст.
- * Всё рисуется средствами GuiGraphics, без шейдеров — работает везде.
+ * Высокоуровневые утилиты отрисовки Aurora: стеклянные панели и капсулы,
+ * текст с кастомным шрифтом Inter (полная кириллица, рендер через NanoVG)
+ * и мягкой тенью, перенос строк по словам.
+ *
+ * <p>Формы делегируются в векторный движок {@link GfxEngine}. Если движок
+ * недоступен (например, библиотека не загрузилась), текст плавно
+ * деградирует на ванильный шрифт — интерфейс остаётся рабочим.</p>
  */
 public final class RenderUtil {
-    /** Идентификатор кастомного шрифта (assets/aurora/font/aurora.json). */
-    public static final Identifier FONT_ID = Identifier.fromNamespaceAndPath("aurora", "aurora");
-
     private RenderUtil() {
     }
 
     /* ------------------------------------------------------------------ */
-    /*  Скруглённые фигуры                                                */
+    /*  Формы (делегируются в векторный движок)                           */
     /* ------------------------------------------------------------------ */
 
-    /** Скруглённый прямоугольник залитый цветом. */
+    /** Скруглённый прямоугольник, залитый цветом. */
+    public static void rounded(GuiGraphics g, float x, float y, float w, float h, float r, int color) {
+        GfxEngine.rounded(g, x, y, w, h, r, color);
+    }
+
     public static void rounded(GuiGraphics g, int x, int y, int w, int h, int r, int color) {
-        if (w <= 0 || h <= 0) {
-            return;
-        }
-        r = Math.max(0, Math.min(r, Math.min(w, h) / 2));
-        if (r == 0) {
-            g.fill(x, y, x + w, y + h, color);
-            return;
-        }
-        // центральная часть на всю ширину
-        g.fill(x, y + r, x + w, y + h - r, color);
-        // верхняя и нижняя полосы
-        g.fill(x + r, y, x + w - r, y + r, color);
-        g.fill(x + r, y + h - r, x + w - r, y + h, color);
-        // скруглённые углы — построчно
-        for (int dy = 0; dy < r; dy++) {
-            float half = (float) Math.sqrt(r * r - (r - 0.5f - dy) * (r - 0.5f - dy));
-            int inset = (int) Math.floor(r - half);
-            if (inset <= 0) {
-                continue;
-            }
-            g.fill(x + inset, y + dy, x + r, y + dy + 1, color);
-            g.fill(x + w - r, y + dy, x + w - inset, y + dy + 1, color);
-            g.fill(x + inset, y + h - 1 - dy, x + r, y + h - dy, color);
-            g.fill(x + w - r, y + h - 1 - dy, x + w - inset, y + h - dy, color);
-        }
+        GfxEngine.rounded(g, x, y, w, h, r, color);
     }
 
-    /** Скруглённый прямоугольник с вертикальным градиентом. */
-    public static void roundedGradient(GuiGraphics g, int x, int y, int w, int h, int r, int colorTop, int colorBottom) {
-        if (w <= 0 || h <= 0) {
-            return;
-        }
-        for (int row = 0; row < h; row++) {
-            float t = h == 1 ? 0 : (float) row / (h - 1);
-            int color = ColorUtil.lerp(colorTop, colorBottom, t);
-            int ry = Math.min(r, Math.min(row, h - 1 - row));
-            if (ry <= 0) {
-                g.fill(x, y + row, x + w, y + row + 1, color);
-            } else {
-                float half = (float) Math.sqrt(ry * ry - (ry - 0.5f) * (ry - 0.5f));
-                int inset = (int) Math.floor(ry - half);
-                g.fill(x + inset, y + row, x + w - inset, y + row + 1, color);
-            }
-        }
+    /** Обводка скруглённого прямоугольника толщиной 1 gui-пиксель. */
+    public static void roundedOutline(GuiGraphics g, float x, float y, float w, float h, float r, int color) {
+        GfxEngine.outline(g, x, y, w, h, r, color, 1f);
     }
 
-    /** Обводка скруглённого прямоугольника толщиной 1px. */
     public static void roundedOutline(GuiGraphics g, int x, int y, int w, int h, int r, int color) {
-        r = Math.max(0, Math.min(r, Math.min(w, h) / 2));
-        g.fill(x + r, y, x + w - r, y + 1, color);
-        g.fill(x + r, y + h - 1, x + w - r, y + h, color);
-        g.fill(x, y + r, x + 1, y + h - r, color);
-        g.fill(x + w - 1, y + r, x + w, y + h - r, color);
-        for (int dy = 0; dy < r; dy++) {
-            float half = (float) Math.sqrt(r * r - (r - 0.5f - dy) * (r - 0.5f - dy));
-            int inset = (int) Math.floor(r - half);
-            if (inset < 0) {
-                inset = 0;
-            }
-            g.fill(x + inset, y + dy, x + inset + 1, y + dy + 1, color);
-            g.fill(x + w - 1 - inset, y + dy, x + w - inset, y + dy + 1, color);
-            g.fill(x + inset, y + h - 1 - dy, x + inset + 1, y + h - dy, color);
-            g.fill(x + w - 1 - inset, y + h - 1 - dy, x + w - inset, y + h - dy, color);
-        }
+        GfxEngine.outline(g, x, y, w, h, r, color, 1f);
     }
 
-    /** Стеклянная панель: тень + полупрозрачная заливка + обводка + блик сверху. */
+    /** Гладкий круг. */
+    public static void circle(GuiGraphics g, float cx, float cy, float d, int color) {
+        GfxEngine.circle(g, cx, cy, d, color);
+    }
+
+    public static void circle(GuiGraphics g, int cx, int cy, int d, int color) {
+        GfxEngine.circle(g, cx, cy, d, color);
+    }
+
+    /** Гладкое кольцо. */
+    public static void ring(GuiGraphics g, float cx, float cy, float d, int color, float thickness) {
+        GfxEngine.ring(g, cx, cy, d, color, thickness);
+    }
+
+    /** Мягкое радиальное свечение (пятно за элементом). */
+    public static void glow(GuiGraphics g, float x, float y, float w, float h, int color) {
+        float sigma = Math.max(10f, Math.min(w, h) / 2.6f);
+        GfxEngine.glow(g, x, y, w, h, Math.min(w, h) / 2f, sigma, color);
+    }
+
+    public static void glow(GuiGraphics g, int x, int y, int w, int h, int color) {
+        glow(g, (float) x, (float) y, (float) w, (float) h, color);
+    }
+
+    /** Виньетка на весь экран. */
+    public static void vignette(GuiGraphics g, int w, int h, int color) {
+        GfxEngine.vignette(g, w, h, color);
+    }
+
+    /** Мягкая тень под панелью (смещение 3px, размытие 7px). */
+    public static void softShadow(GuiGraphics g, float x, float y, float w, float h, float r, int alpha) {
+        GfxEngine.dropShadow(g, x, y, w, h, r, 3f, 7f, ColorUtil.alpha(0x05060A, alpha));
+    }
+
+    public static void softShadow(GuiGraphics g, int x, int y, int w, int h, int r, int alpha) {
+        softShadow(g, (float) x, (float) y, (float) w, (float) h, (float) r, alpha);
+    }
+
+    /* ------------------------------------------------------------------ */
+    /*  Scissor                                                           */
+    /* ------------------------------------------------------------------ */
+
+    public static void pushScissor(GuiGraphics g, int x1, int y1, int x2, int y2) {
+        GfxEngine.pushScissor(g, x1, y1, x2, y2);
+    }
+
+    public static void popScissor(GuiGraphics g) {
+        GfxEngine.popScissor(g);
+    }
+
+    /* ------------------------------------------------------------------ */
+    /*  Стекло                                                            */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * Стеклянная панель: мягкая тень, тёмная подложка, обводка 1px
+     * и тонкий блик по верхней кромке.
+     */
+    public static void glassPanel(GuiGraphics g, float x, float y, float w, float h, float r, Theme theme) {
+        softShadow(g, x, y, w, h, r, 110);
+        GfxEngine.rounded(g, x, y, w, h, r, theme.panelColor());
+        GfxEngine.outline(g, x, y, w, h, r, theme.borderColor(), 1f);
+        // блик
+        float inset = Math.min(r + 2, w / 2f);
+        GfxEngine.rounded(g, x + inset, y + 1, w - inset * 2, 1, 0.5f, ColorUtil.rgba(255, 255, 255, 20));
+    }
+
     public static void glassPanel(GuiGraphics g, int x, int y, int w, int h, int r, Theme theme) {
-        // мягкая тень только вниз
-        rounded(g, x, y + 2, w, h, r, ColorUtil.rgba(0, 0, 0, (int) (theme.backgroundAlpha * 55)));
-        // заливка
-        rounded(g, x, y, w, h, r, theme.panelColor());
-        // обводка
-        roundedOutline(g, x, y, w, h, r, theme.borderColor());
-        // блик по верхней кромке
-        g.fill(x + r, y + 1, x + w - r, y + 2, ColorUtil.rgba(255, 255, 255, 22));
+        glassPanel(g, (float) x, (float) y, (float) w, (float) h, (float) r, theme);
+    }
+
+    /**
+     * Стеклянная капсула HUD-элемента: тень, тёмная полупрозрачная подложка,
+     * обводка. Без лишних полосок — чистое стекло в цвет темы.
+     */
+    public static void glassCapsule(GuiGraphics g, float x, float y, float w, float h, float r, Theme theme) {
+        softShadow(g, x, y, w, h, r, 70);
+        GfxEngine.rounded(g, x, y, w, h, r,
+                ColorUtil.rgba(10, 11, 18, (int) (theme.backgroundAlpha * 205)));
+        GfxEngine.outline(g, x, y, w, h, r, ColorUtil.rgba(255, 255, 255, 30), 1f);
+        float inset = Math.min(r + 1, w / 2f);
+        GfxEngine.rounded(g, x + inset, y + 0.5f, w - inset * 2, 1, 0.5f, ColorUtil.rgba(255, 255, 255, 14));
+    }
+
+    public static void glassCapsule(GuiGraphics g, int x, int y, int w, int h, int r, Theme theme) {
+        glassCapsule(g, (float) x, (float) y, (float) w, (float) h, (float) r, theme);
     }
 
     /* ------------------------------------------------------------------ */
     /*  Текст                                                             */
     /* ------------------------------------------------------------------ */
 
-    private static MutableComponent styled(String s) {
-        return Component.literal(s == null ? "" : s).setStyle(Style.EMPTY.withFont(new FontDescription.Resource(FONT_ID)));
+    /** Ванильный текст (когда кастомный шрифт выключен или движок недоступен). */
+    private static int vanilla(GuiGraphics g, Font font, String s, float x, float y, int color) {
+        g.drawString(font, s == null ? "" : s, Math.round(x), Math.round(y), color, false);
+        return font.width(s == null ? "" : s);
     }
 
-    /** Оборачивает строку в Component с кастомным шрифтом, если он включён. */
-    public static Component text(String s, Theme theme) {
-        return theme.customFont ? styled(s) : Component.literal(s == null ? "" : s);
+    /** Высота строки шрифта. */
+    public static int fontHeight(Font font) {
+        return 9;
     }
 
     /** Ширина строки с учётом выбранного шрифта. */
     public static int width(Font font, String s, Theme theme) {
-        return font.width(theme.customFont ? styled(s).getString() : s);
-    }
-
-    /** Рисует текст (с тенью). Возвращает ширину. */
-    public static int drawText(GuiGraphics g, Font font, String s, int x, int y, int color, Theme theme) {
-        if (theme.customFont) {
-            g.drawString(font, styled(s), x, y, color, true);
-        } else {
-            g.drawString(font, s, x, y, color, true);
+        if (s == null || s.isEmpty()) {
+            return 0;
         }
-        return width(font, s, theme);
+        if (theme.customFont) {
+            return Math.round(GfxEngine.textWidth(s));
+        }
+        return font.width(s);
     }
 
-    /** Рисует текст по центру указанной области. */
-    public static void drawCenteredText(GuiGraphics g, Font font, String s, int cx, int y, int color, Theme theme) {
-        drawText(g, font, s, cx - width(font, s, theme) / 2, y, color, theme);
+    /** Ширина полужирной строки. */
+    public static int widthBold(Font font, String s, Theme theme) {
+        if (s == null || s.isEmpty()) {
+            return 0;
+        }
+        if (theme.customFont) {
+            return Math.round(GfxEngine.textWidth(s, GfxEngine.TEXT_SIZE, true));
+        }
+        return font.width(s);
     }
 
-    /** Градиентный текст: каждый символ interpolируется между двумя цветами. */
-    public static int drawGradientText(GuiGraphics g, Font font, String s, int x, int y, int colorA, int colorB, Theme theme) {
+    /** Рисует текст (с мягкой тенью). Возвращает ширину. */
+    public static int drawText(GuiGraphics g, Font font, String s, float x, float y, int color, Theme theme) {
+        if (color == 0 || ColorUtil.alphaI(color) == 0) {
+            return width(font, s, theme);
+        }
+        if (theme.customFont && GfxEngine.isAvailable()) {
+            int a = ColorUtil.alphaI(color);
+            // мягкая тень: полупрозрачная копия со смещением
+            GfxEngine.drawText(g, x + 1, y + 1 + GfxEngine.TEXT_BASELINE, s,
+                    GfxEngine.TEXT_SIZE, ColorUtil.alpha(0x05060A, a * 45 / 100), false);
+            GfxEngine.drawText(g, x, y + GfxEngine.TEXT_BASELINE, s, GfxEngine.TEXT_SIZE, color, false);
+            return width(font, s, theme);
+        }
+        return vanilla(g, font, s, x, y, color);
+    }
+
+    public static int drawText(GuiGraphics g, Font font, String s, int x, int y, int color, Theme theme) {
+        return drawText(g, font, s, (float) x, (float) y, color, theme);
+    }
+
+    /** Текст без тени. */
+    public static void drawTextFlat(GuiGraphics g, Font font, String s, float x, float y, int color, Theme theme) {
+        if (color == 0 || ColorUtil.alphaI(color) == 0) {
+            return;
+        }
+        if (theme.customFont && GfxEngine.isAvailable()) {
+            GfxEngine.drawText(g, x, y + GfxEngine.TEXT_BASELINE, s, GfxEngine.TEXT_SIZE, color, false);
+            return;
+        }
+        vanilla(g, font, s, x, y, color);
+    }
+
+    /** Полужирный текст (Inter SemiBold). */
+    public static int drawTextBold(GuiGraphics g, Font font, String s, float x, float y, int color, Theme theme) {
+        if (color == 0 || ColorUtil.alphaI(color) == 0) {
+            return widthBold(font, s, theme);
+        }
+        if (theme.customFont && GfxEngine.isAvailable()) {
+            int a = ColorUtil.alphaI(color);
+            GfxEngine.drawText(g, x + 1, y + 1 + GfxEngine.TEXT_BASELINE, s,
+                    GfxEngine.TEXT_SIZE, ColorUtil.alpha(0x05060A, a * 45 / 100), true);
+            GfxEngine.drawText(g, x, y + GfxEngine.TEXT_BASELINE, s, GfxEngine.TEXT_SIZE, color, true);
+            return widthBold(font, s, theme);
+        }
+        return vanilla(g, font, s, x, y, color);
+    }
+
+    /** Текст по центру указанной точки. */
+    public static void drawCenteredText(GuiGraphics g, Font font, String s, float cx, float y, int color, Theme theme) {
+        drawText(g, font, s, cx - width(font, s, theme) / 2f, y, color, theme);
+    }
+
+    /** Градиентный текст: каждый символ интерполируется между двумя цветами. */
+    public static int drawGradientText(GuiGraphics g, Font font, String s, float x, float y, int colorA, int colorB, Theme theme) {
+        if (theme.customFont && GfxEngine.isAvailable()) {
+            float total = GfxEngine.textWidth(s);
+            float cx = x;
+            for (int i = 0; i < s.length(); i++) {
+                String ch = String.valueOf(s.charAt(i));
+                float chw = GfxEngine.textWidth(ch);
+                float t = total <= 0 ? 0 : (cx - x) / total;
+                drawText(g, font, ch, cx, y, ColorUtil.lerp(colorA, colorB, t), theme);
+                cx += chw;
+            }
+            return Math.round(total);
+        }
         int total = width(font, s, theme);
-        int cx = x;
+        float cx = x;
         for (int i = 0; i < s.length(); i++) {
             String ch = String.valueOf(s.charAt(i));
             int chw = width(font, ch, theme);
-            float t = total <= 0 ? 0 : (float) (cx - x) / total;
+            float t = total <= 0 ? 0 : (cx - x) / total;
             drawText(g, font, ch, cx, y, ColorUtil.lerp(colorA, colorB, t), theme);
             cx += chw;
         }
@@ -152,16 +246,89 @@ public final class RenderUtil {
     }
 
     /** Текст со свечением (несколько смещённых полупрозрачных копий). */
-    public static void drawGlowText(GuiGraphics g, Font font, String s, int x, int y, int color, int glow, Theme theme) {
-        g.drawString(font, theme.customFont ? styled(s) : Component.literal(s), x + 1, y, glow, false);
-        g.drawString(font, theme.customFont ? styled(s) : Component.literal(s), x - 1, y, glow, false);
-        g.drawString(font, theme.customFont ? styled(s) : Component.literal(s), x, y + 1, glow, false);
-        g.drawString(font, theme.customFont ? styled(s) : Component.literal(s), x, y - 1, glow, false);
+    public static void drawGlowText(GuiGraphics g, Font font, String s, float x, float y, int color, int glow, Theme theme) {
+        if (theme.customFont && GfxEngine.isAvailable()) {
+            if (ColorUtil.alphaI(glow) > 0) {
+                float base = y + GfxEngine.TEXT_BASELINE;
+                GfxEngine.drawText(g, x + 1, base, s, GfxEngine.TEXT_SIZE, glow, true);
+                GfxEngine.drawText(g, x - 1, base, s, GfxEngine.TEXT_SIZE, glow, true);
+                GfxEngine.drawText(g, x, base + 1, s, GfxEngine.TEXT_SIZE, glow, true);
+                GfxEngine.drawText(g, x, base - 1, s, GfxEngine.TEXT_SIZE, glow, true);
+            }
+            drawText(g, font, s, x, y, color, theme);
+            return;
+        }
+        if (ColorUtil.alphaI(glow) > 0) {
+            g.drawString(font, s == null ? "" : s, Math.round(x) + 1, Math.round(y), glow, false);
+            g.drawString(font, s == null ? "" : s, Math.round(x) - 1, Math.round(y), glow, false);
+            g.drawString(font, s == null ? "" : s, Math.round(x), Math.round(y) + 1, glow, false);
+            g.drawString(font, s == null ? "" : s, Math.round(x), Math.round(y) - 1, glow, false);
+        }
         drawText(g, font, s, x, y, color, theme);
     }
 
-    /** Высота строки шрифта. */
-    public static int fontHeight(Font font) {
-        return font.lineHeight;
+    /* ------------------------------------------------------------------ */
+    /*  Перенос строк                                                     */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * Переносит строку по словам, чтобы каждая строка была не шире maxWidth.
+     * Слова не разрезаются на части.
+     */
+    public static List<String> wrapLines(Font font, String s, int maxWidth, Theme theme) {
+        List<String> out = new ArrayList<>();
+        if (s == null || s.isEmpty()) {
+            return out;
+        }
+        for (String paragraph : s.split("\n")) {
+            StringBuilder line = new StringBuilder();
+            for (String word : paragraph.split(" ")) {
+                String candidate = line.isEmpty() ? word : line + " " + word;
+                if (width(font, candidate, theme) <= maxWidth || line.isEmpty()) {
+                    line.setLength(0);
+                    line.append(candidate);
+                } else {
+                    out.add(line.toString());
+                    line.setLength(0);
+                    line.append(word);
+                }
+            }
+            out.add(line.toString());
+        }
+        return out;
+    }
+
+    /**
+     * Переносит строку не более чем на maxLines строк; если текст не влезает —
+     * последняя строка заканчивается «...» на границе слова (без разреза слова).
+     */
+    public static List<String> wrapLimited(Font font, String s, int maxWidth, Theme theme, int maxLines) {
+        List<String> lines = wrapLines(font, s, maxWidth, theme);
+        if (lines.size() <= maxLines) {
+            return lines;
+        }
+        List<String> cut = new ArrayList<>(lines.subList(0, maxLines));
+        // поместить «...» в последнюю строку, не разрезая слова
+        String last = cut.get(maxLines - 1);
+        int dots = width(font, "...", theme);
+        while (!last.isEmpty() && width(font, last, theme) + dots > maxWidth) {
+            int sp = last.lastIndexOf(' ');
+            if (sp <= 0) {
+                last = "";
+            } else {
+                last = last.substring(0, sp);
+            }
+        }
+        cut.set(maxLines - 1, last.isEmpty() ? "..." : last + "...");
+        return cut;
+    }
+
+    /** Обрезает строку под ширину, добавляя «...» на границе слова. */
+    public static String ellipsize(Font font, String s, int maxWidth, Theme theme) {
+        if (width(font, s, theme) <= maxWidth) {
+            return s;
+        }
+        List<String> lines = wrapLimited(font, s, maxWidth, theme, 1);
+        return lines.isEmpty() ? s : lines.get(0);
     }
 }

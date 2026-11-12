@@ -79,11 +79,38 @@ public abstract class HudModule extends Module {
         g.pose().translate(px, py);
         g.pose().scale(s, s);
         if (background.get()) {
-            RenderUtil.rounded(g, -1, -1, width() + 2, height() + 2, 5, ColorUtil.rgba(10, 11, 18, (int) (theme.backgroundAlpha * 200)));
-            RenderUtil.roundedOutline(g, -1, -1, width() + 2, height() + 2, 5, ColorUtil.rgba(255, 255, 255, 20));
+            // стеклянная капсула: тень, подложка, обводка
+            RenderUtil.glassCapsule(g, -3, -1, width() + 6, height() + 2, 7, theme);
+            // текст должен рисоваться в отдельном слое поверх капсулы
+            g.nextStratum();
         }
         renderContent(g, mc.font, dt, theme, mc);
         g.pose().popMatrix();
+    }
+
+    /* ------------------------------------------------------------------ */
+    /*  Кэш строк HUD (меньше мусора и строковых операций в кадре)        */
+    /* ------------------------------------------------------------------ */
+
+    private static final java.util.Map<String, long[]> STAMPS = new java.util.HashMap<>();
+    private static final java.util.Map<String, String> CACHE = new java.util.HashMap<>();
+
+    /**
+     * Возвращает закэшированное значение, обновляя его не чаще intervalMs.
+     * Ключи уникальны для каждого значения (fps, ping, clock, ...).
+     */
+    protected static String cached(String key, long intervalMs, java.util.function.Supplier<String> supplier) {
+        long now = System.currentTimeMillis();
+        long[] stamp = STAMPS.get(key);
+        if (stamp == null || now - stamp[0] >= intervalMs) {
+            CACHE.put(key, supplier.get());
+            if (stamp == null) {
+                stamp = new long[1];
+                STAMPS.put(key, stamp);
+            }
+            stamp[0] = now;
+        }
+        return CACHE.get(key);
     }
 
     /** Рамка выделения в редакторе HUD. */

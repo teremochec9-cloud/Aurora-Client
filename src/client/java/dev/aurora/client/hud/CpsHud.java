@@ -14,7 +14,7 @@ import net.minecraft.client.gui.GuiGraphics;
 public class CpsHud extends HudModule {
 
     public CpsHud() {
-        super("CPS", "Клики в секунду", 0.005f, 0.177f);
+        super("CPS", "Клики в секунду", 0.005f, 0.300f);
     }
 
     @Override
@@ -34,8 +34,8 @@ public class CpsHud extends HudModule {
 
     @Override
     protected void renderContent(GuiGraphics g, Font font, DeltaTracker dt, Theme theme, Minecraft mc) {
-        int cps = ClickTracker.leftCps() + ClickTracker.rightCps();
+        String cpsStr = cached("cps", 250, () -> String.valueOf(ClickTracker.leftCps() + ClickTracker.rightCps()));
         RenderUtil.drawText(g, font, "CPS: ", 5, 3, theme.textSecondary(), theme);
-        RenderUtil.drawText(g, font, String.valueOf(cps), 5 + RenderUtil.width(font, "CPS: ", theme), 3, theme.accentNow(), theme);
+        RenderUtil.drawText(g, font, cpsStr, 5 + RenderUtil.width(font, "CPS: ", theme), 3, theme.accentNow(), theme);
     }
 }

@@ -14,7 +14,7 @@ import net.minecraft.client.gui.GuiGraphics;
 public class PingHud extends HudModule {
 
     public PingHud() {
-        super("Пинг", "Задержка до сервера в миллисекундах", 0.005f, 0.091f);
+        super("Пинг", "Задержка до сервера в миллисекундах", 0.005f, 0.150f);
     }
 
     @Override
@@ -34,8 +34,11 @@ public class PingHud extends HudModule {
 
     @Override
     protected void renderContent(GuiGraphics g, Font font, DeltaTracker dt, Theme theme, Minecraft mc) {
+        String value = cached("ping", 500, () -> {
+            int p = WatermarkHud.ping(mc);
+            return p < 0 ? "—" : p + " ms";
+        });
         int ping = WatermarkHud.ping(mc);
-        String value = ping < 0 ? "—" : ping + " ms";
         int color = ping < 0 ? theme.textSecondary() : ping < 80 ? ColorUtil.rgb(134, 239, 172)
                 : ping < 160 ? ColorUtil.rgb(253, 224, 71) : ColorUtil.rgb(252, 165, 165);
         RenderUtil.drawText(g, font, "Пинг: ", 5, 3, theme.textSecondary(), theme);
