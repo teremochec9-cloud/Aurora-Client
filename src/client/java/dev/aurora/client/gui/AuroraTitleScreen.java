@@ -27,8 +27,13 @@ import java.util.Random;
 
 /**
  * Главное меню Aurora: размытая панорама с виньеткой и «северным сиянием»,
- * по центру стеклянная карточка с градиентным логотипом и скруглёнными
- * кнопками с плавным наведением.
+ * по центру стеклянная карточка с крупным градиентным логотипом и
+ * скруглёнными кнопками с плавным наведением.
+ *
+ * <p>Вёрстка адаптивная и рассчитана на реальные gui-высоты: на типичном
+ * окне 854x480 (gui 427x240) карточка остаётся с логотипом, подписью и
+ * полноразмерными кнопками — «компактный» режим включается только при
+ * действительно малой высоте.</p>
  */
 public class AuroraTitleScreen extends Screen {
     private final Theme theme;
@@ -71,7 +76,8 @@ public class AuroraTitleScreen extends Screen {
     protected void init() {
         particles.clear();
         Random random = new Random();
-        for (int i = 0; i < 46; i++) {
+        int count = this.height < 210 ? 24 : 46;
+        for (int i = 0; i < count; i++) {
             particles.add(new Particle(random, this.width, this.height));
         }
         if (hoverAnims.isEmpty()) {
@@ -120,7 +126,7 @@ public class AuroraTitleScreen extends Screen {
                     ColorUtil.alpha(theme.accent((i + 0.5f) / 3f), alpha));
         }
 
-        // частицы-светлячки (гладкие точки)
+        // частицы-светлячки: мягкий ореол + яркое ядро
         int pAlpha = (int) (255 * appearT);
         for (Particle p : particles) {
             float px = p.x + (float) Math.sin(time / 2000.0 + p.phase) * 8 + p.drift * (time % 10000) / 10000.0f;
@@ -129,8 +135,10 @@ public class AuroraTitleScreen extends Screen {
                 py += this.height + 40;
             }
             float twinkle = 0.4f + 0.6f * (float) Math.abs(Math.sin(time / 700.0 + p.phase));
-            GfxEngine.circle(g, px, py, Math.max(1.6f, p.size * 1.6f),
-                    ColorUtil.rgba(255, 255, 255, (int) (70 * twinkle * pAlpha / 255f)));
+            float d = Math.max(1.6f, p.size * 1.6f);
+            int tw = (int) (70 * twinkle * pAlpha / 255f);
+            GfxEngine.circle(g, px, py, d * 2.6f, ColorUtil.rgba(255, 255, 255, tw / 3));
+            GfxEngine.circle(g, px, py, d, ColorUtil.rgba(255, 255, 255, tw));
         }
 
         // виньетка
@@ -151,78 +159,73 @@ public class AuroraTitleScreen extends Screen {
         Minecraft mc = Minecraft.getInstance();
 
         // ===== адаптивная вёрстка =====
-        boolean compact = this.height < 300;
-        int logoScale = compact ? 2 : 3;
-        int bh = compact ? 22 : 30;
-        int gap = compact ? 4 : 7;
-        int bw = Math.min(240, this.width - 60);
-        int pad = compact ? 14 : 26;
+        boolean tiny = this.height < 210;
+        boolean full = !tiny && this.height >= 310;
+        int logoScale = tiny ? 2 : full ? 3 : 2;
+        int bh = tiny ? 20 : full ? 30 : 24;
+        int gap = tiny ? 3 : full ? 7 : 4;
+        int bw = Math.min(260, this.width - 64);
+        int pad = tiny ? 10 : full ? 24 : 16;
 
         // ===== размеры стеклянной карточки =====
         int logoW = RenderUtil.widthBold(font, Theme.CLIENT_NAME, theme) * logoScale;
         int logoH = RenderUtil.fontHeight(font) * logoScale;
         int stackH = BUTTONS.length * bh + (BUTTONS.length - 1) * gap;
-        int cardH = pad + logoH + (compact ? 6 : 12) + (compact ? 0 : 11) + (compact ? 0 : 12)
-                + (compact ? 10 : 16) + stackH + pad - (compact ? 2 : 6);
+        int subH = tiny ? 0 : full ? 26 : 12;
+        int cardH = pad + logoH + 8 + subH + (tiny ? 8 : 12) + stackH + pad - 4;
         int cardW = bw + pad * 2;
         int cardX = this.width / 2 - cardW / 2;
-        int cardY = Math.max(10, this.height / 2 - cardH / 2 - (compact ? 4 : 10));
-        cardH = Math.min(cardH, this.height - 20);
+        int cardY = Math.max(8, this.height / 2 - cardH / 2);
+        cardH = Math.min(cardH, this.height - 16);
 
         // ===== фаза 1: формы =====
         // плавное появление карточки (масштаб вокруг центра)
-        if (theme.animations) {
-            g.pose().pushMatrix();
-            float sc = 0.97f + 0.03f * t;
-            float ccx = this.width / 2f;
-            float ccy = this.height / 2f;
-            g.pose().translate(ccx, ccy);
-            g.pose().scale(sc, sc);
-            g.pose().translate(-ccx, -ccy);
-        }
+        g.pose().pushMatrix();
+        float sc = theme.animations ? 0.97f + 0.03f * t : 1f;
+        float ccx = this.width / 2f;
+        float ccy = this.height / 2f;
+        g.pose().translate(ccx, ccy);
+        g.pose().scale(sc, sc);
+        g.pose().translate(-ccx, -ccy);
 
-        RenderUtil.softShadow(g, cardX, cardY, cardW, cardH, 16, 150);
-        GfxEngine.rounded(g, cardX, cardY, cardW, cardH, 16, ColorUtil.alpha(theme.panelColor(), (int) (215 * t)));
-        GfxEngine.outline(g, cardX, cardY, cardW, cardH, 16, ColorUtil.rgba(255, 255, 255, (int) (30 * t)), 1f);
-        GfxEngine.rounded(g, cardX + 18, cardY + 1, cardW - 36, 1, 0.5f, ColorUtil.rgba(255, 255, 255, (int) (26 * t)));
+        RenderUtil.softShadow(g, cardX, cardY, cardW, cardH, 18, 150);
+        GfxEngine.rounded(g, cardX, cardY, cardW, cardH, 18, ColorUtil.alpha(theme.panelColor(), (int) (215 * t)));
+        GfxEngine.outline(g, cardX, cardY, cardW, cardH, 18, ColorUtil.rgba(255, 255, 255, (int) (30 * t)), 1f);
+        GfxEngine.rounded(g, cardX + 20, cardY + 1, cardW - 40, 1, 0.5f, ColorUtil.rgba(255, 255, 255, (int) (26 * t)));
 
-        // свечение за логотипом
+        // логотип и линия-акцент под ним
         int lx = this.width / 2 - logoW / 2 - (int) ((1 - t) * 14);
         int ly = cardY + pad;
-        RenderUtil.glow(g, lx - logoW, ly - logoH - 4, logoW * 2.4f, logoH * 2.4f,
+        RenderUtil.glow(g, lx - logoW / 2f, ly - logoH / 2f - 2, logoW * 2.4f, logoH * 2.4f,
                 ColorUtil.alpha(theme.accentNow(), (int) (46 * t)));
+        float lineW = Math.max(24, logoW * 0.36f);
+        GfxEngine.rounded(g, this.width / 2f - lineW / 2, ly + logoH + 3.5f, lineW, 1.5f, 0.75f,
+                ColorUtil.alpha(theme.accentNow(), (int) (190 * t)));
 
         // кнопки (формы)
-        int by = cardY + cardH - pad - stackH + (compact ? 2 : 4);
+        int by = cardY + cardH - pad - stackH;
         int bx = this.width / 2 - bw / 2;
         for (int i = 0; i < BUTTONS.length; i++) {
-            by = drawButtonShape(g, bx, by, bw, bh, i, t);
+            by = drawButtonShape(g, bx, by, bw, bh, i, t, gap);
         }
 
         // нижний ряд мелких кнопок (формы)
-        int sbY = this.height - (compact ? 22 : 34);
+        int sbY = this.height - (tiny ? 20 : 32);
         int sbX = this.width - 10;
         sbX = smallButtonShape(g, sbX, sbY, "Спец. возможности", BUTTONS.length, () ->
                 mc.setScreen(new AccessibilityOptionsScreen(this, mc.options)));
         smallButtonShape(g, sbX, sbY, "Язык", BUTTONS.length + 1, () ->
                 mc.setScreen(new LanguageSelectScreen(this, mc.options, mc.getLanguageManager())));
 
-        if (theme.animations) {
-            g.pose().popMatrix();
-        }
+        g.pose().popMatrix();
 
         g.nextStratum();
 
         // ===== фаза 2: текст =====
-        if (theme.animations) {
-            g.pose().pushMatrix();
-            float sc = 0.97f + 0.03f * t;
-            float ccx = this.width / 2f;
-            float ccy = this.height / 2f;
-            g.pose().translate(ccx, ccy);
-            g.pose().scale(sc, sc);
-            g.pose().translate(-ccx, -ccy);
-        }
+        g.pose().pushMatrix();
+        g.pose().translate(ccx, ccy);
+        g.pose().scale(sc, sc);
+        g.pose().translate(-ccx, -ccy);
 
         // градиентный логотип по символам
         g.pose().pushMatrix();
@@ -231,20 +234,23 @@ public class AuroraTitleScreen extends Screen {
         RenderUtil.drawGradientText(g, font, Theme.CLIENT_NAME, 0, 0, theme.accentNow(), theme.accent(1.0f), theme);
         g.pose().popMatrix();
 
-        int textY = ly + logoH + (compact ? 4 : 8);
-        if (!compact) {
+        int textY = ly + logoH + 8;
+        if (full) {
             RenderUtil.drawCenteredText(g, font, "клиент для Minecraft " + Theme.MC_VERSION,
                     this.width / 2f, textY, ColorUtil.alpha(theme.textSecondary(), (int) (220 * t)), theme);
-            textY += 11;
+            textY += 12;
             RenderUtil.drawCenteredText(g, font, "С возвращением, " + mc.getUser().getName(),
                     this.width / 2f, textY, ColorUtil.alpha(theme.accentNow(), (int) (255 * t)), theme);
+        } else if (!tiny) {
+            RenderUtil.drawCenteredText(g, font, "С возвращением, " + mc.getUser().getName(),
+                    this.width / 2f, textY, ColorUtil.alpha(theme.textSecondary(), (int) (220 * t)), theme);
         }
 
         // подписи кнопок
-        int ty = cardY + cardH - pad - stackH + (compact ? 2 : 4);
+        int ty = cardY + cardH - pad - stackH;
         int tx = this.width / 2 - bw / 2;
         for (int i = 0; i < BUTTONS.length; i++) {
-            ty = drawButtonText(g, tx, ty, bw, bh, i, t);
+            ty = drawButtonText(g, tx, ty, bw, bh, i, t, gap);
         }
 
         // мелкие кнопки: подписи
@@ -252,12 +258,10 @@ public class AuroraTitleScreen extends Screen {
         stx = smallButtonText(g, stx, sbY, "Спец. возможности", BUTTONS.length);
         smallButtonText(g, stx, sbY, "Язык", BUTTONS.length + 1);
 
-        if (theme.animations) {
-            g.pose().popMatrix();
-        }
+        g.pose().popMatrix();
 
         // ===== подписи по углам =====
-        if (compact) {
+        if (tiny) {
             String line = "Aurora " + Theme.CLIENT_VERSION + " · " + mc.getFps() + " fps";
             RenderUtil.drawText(g, font, line, 8, this.height - 12, theme.textSecondary(), theme);
         } else {
@@ -273,14 +277,14 @@ public class AuroraTitleScreen extends Screen {
     }
 
     /** Форма кнопки с lerp-наведением. Возвращает y следующей кнопки. */
-    private int drawButtonShape(GuiGraphics g, int x, int y, int w, int h, int index, float appearT) {
+    private int drawButtonShape(GuiGraphics g, int x, int y, int w, int h, int index, float appearT, int gap) {
         float delay = index * 0.06f;
         float bt = Animation.smooth(Math.max(0, Math.min(1, (appearT - delay) / Math.max(0.001f, 1 - delay))));
         int offsetY = (int) ((1 - bt) * 10);
         int alpha = (int) (255 * bt);
         int by = y + offsetY;
         if (alpha < 6) {
-            return y + h + (h > 20 ? 7 : 4);
+            return y + h + gap;
         }
 
         Animation hoverAnim = hoverAnims.get(index);
@@ -296,7 +300,7 @@ public class AuroraTitleScreen extends Screen {
 
         // акцентная полоска слева при наведении
         if (hv > 0.02f) {
-            GfxEngine.rounded(g, x + 10, by + h / 2f - 5, 3, 10, 1.5f,
+            GfxEngine.rounded(g, x + 12, by + h / 2f - 5, 3, 10, 1.5f,
                     ColorUtil.alpha(theme.accentNow(), (int) (220 * hv)));
         }
 
@@ -304,24 +308,24 @@ public class AuroraTitleScreen extends Screen {
         if (bt > 0.9f) {
             hits.add(new Hit(x, fby, w, h, () -> onButton(index)));
         }
-        return y + h + (h > 20 ? 7 : 4);
+        return y + h + gap;
     }
 
     /** Подпись кнопки. Возвращает y следующей кнопки. */
-    private int drawButtonText(GuiGraphics g, int x, int y, int w, int h, int index, float appearT) {
+    private int drawButtonText(GuiGraphics g, int x, int y, int w, int h, int index, float appearT, int gap) {
         float delay = index * 0.06f;
         float bt = Animation.smooth(Math.max(0, Math.min(1, (appearT - delay) / Math.max(0.001f, 1 - delay))));
         int offsetY = (int) ((1 - bt) * 10);
         int alpha = (int) (255 * bt);
         int by = y + offsetY;
         if (alpha < 6) {
-            return y + h + (h > 20 ? 7 : 4);
+            return y + h + gap;
         }
         float hv = hoverAnims.get(index).get();
         int textColor = ColorUtil.lerp(theme.textPrimary(), ColorUtil.rgb(255, 255, 255), hv);
         RenderUtil.drawCenteredText(g, font, BUTTONS[index], x + w / 2f, by + h / 2f - RenderUtil.fontHeight(font) / 2f + 1,
                 ColorUtil.alpha(textColor, alpha), theme);
-        return y + h + (h > 20 ? 7 : 4);
+        return y + h + gap;
     }
 
     private void onButton(int index) {
@@ -331,7 +335,7 @@ public class AuroraTitleScreen extends Screen {
             case 0 -> mc.setScreen(new SelectWorldScreen(this));
             case 1 -> mc.setScreen(new JoinMultiplayerScreen(this));
             case 2 -> mc.setScreen(new OptionsScreen(this, mc.options));
-            case 3 -> mc.setScreen(new AuroraClickGui());
+            case 3 -> mc.setScreen(new AuroraClickGui(this));
             default -> mc.stop();
         }
     }
@@ -385,7 +389,7 @@ public class AuroraTitleScreen extends Screen {
     public boolean keyPressed(KeyEvent e) {
         if (e.key() == theme.menuKey) {
             AuroraClickGui.playClick();
-            this.minecraft.setScreen(new AuroraClickGui());
+            this.minecraft.setScreen(new AuroraClickGui(this));
             return true;
         }
         return super.keyPressed(e);

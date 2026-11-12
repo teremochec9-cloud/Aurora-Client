@@ -6,6 +6,7 @@ import dev.aurora.client.module.settings.BooleanSetting;
 import dev.aurora.client.module.settings.NumberSetting;
 import dev.aurora.client.theme.Theme;
 import dev.aurora.client.util.ColorUtil;
+import dev.aurora.client.util.GfxEngine;
 import dev.aurora.client.util.RenderUtil;
 import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.Minecraft;
@@ -72,6 +73,39 @@ public abstract class HudModule extends Module {
         if (!isEnabled()) {
             return;
         }
+        renderInner(g, dt, theme, mc, 1f);
+    }
+
+    /**
+     * Отрисовка в редакторе HUD: включённые элементы рисуются как в игре,
+     * выключенные — «призраками» (подложка + название), чтобы их можно было
+     * найти, перетащить и включить.
+     */
+    public void renderEditor(GuiGraphics g, DeltaTracker dt, Theme theme, Minecraft mc) {
+        if (isEnabled()) {
+            renderInner(g, dt, theme, mc, 1f);
+            return;
+        }
+        float s = scale.get();
+        int px = pixelX(g.guiWidth());
+        int py = pixelY(g.guiHeight());
+        g.pose().pushMatrix();
+        g.pose().translate(px, py);
+        g.pose().scale(s, s);
+        GfxEngine.rounded(g, -3, -1, width() + 6, height() + 2, 7, ColorUtil.rgba(255, 255, 255, 20));
+        GfxEngine.outline(g, -3, -1, width() + 6, height() + 2, 7, ColorUtil.rgba(255, 255, 255, 44), 1f);
+        // подпись у правого края элемента — иначе у «прижатых» к правому краю
+        // элементов текст призрака уходил за границу экрана
+        String label = name + " (выкл)";
+        int labelW = RenderUtil.width(mc.font, label, theme);
+        float labelX = anchorX == 2 ? width() - labelW - 4 : 4;
+        RenderUtil.drawText(g, mc.font, label, labelX, 4,
+                ColorUtil.rgba(255, 255, 255, 130), theme);
+        g.pose().popMatrix();
+    }
+
+    /** Общая внутренняя отрисовка (подложка + содержимое). */
+    private void renderInner(GuiGraphics g, DeltaTracker dt, Theme theme, Minecraft mc, float alpha) {
         float s = scale.get();
         int px = pixelX(g.guiWidth());
         int py = pixelY(g.guiHeight());

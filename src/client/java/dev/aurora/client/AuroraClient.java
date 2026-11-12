@@ -39,6 +39,9 @@ public class AuroraClient implements ClientModInitializer {
     private static final boolean TEST_GUI = "1".equals(System.getenv("AURORA_TEST_GUI"));
     /** Смоук-тест: вместо ClickGUI открыть HUD-редактор (AURORA_TEST_HUD=1). */
     private static final boolean TEST_HUD = "1".equals(System.getenv("AURORA_TEST_HUD"));
+    /** Смоук-тест: сразу открыть вкладку «Тема» (AURORA_TEST_THEME=1). */
+    private static final boolean TEST_THEME = "1".equals(System.getenv("AURORA_TEST_THEME"));
+    private boolean themeTabOpened;
     private int titleTicks;
 
     public static Theme theme() {
@@ -94,6 +97,11 @@ public class AuroraClient implements ClientModInitializer {
                     client.setScreen(TEST_HUD ? new HudEditorScreen() : new AuroraClickGui());
                     titleTicks = -1000000; // один раз
                 }
+            }
+            // смоук-тест вкладки «Тема»: открыть её сразу после ClickGUI
+            if (TEST_THEME && client.screen instanceof AuroraClickGui gui && !themeTabOpened) {
+                gui.debugOpenThemeTab();
+                themeTabOpened = true;
             }
         });
 

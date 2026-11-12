@@ -54,6 +54,8 @@ public class AuroraClickGui extends Screen {
     private static final int SEARCH_W = 150;
 
     private final Theme theme;
+    /** Экран, на который возвращаемся при закрытии (например, главное меню). */
+    private final Screen parent;
     private final Animation openAnim = new Animation(0, 13);
     private final Animation tabAnim = new Animation(0, 12);
     private final Map<Module, Animation> hoverAnims = new HashMap<>();
@@ -137,8 +139,14 @@ public class AuroraClickGui extends Screen {
     private int maxScroll;
 
     public AuroraClickGui() {
+        this(null);
+    }
+
+    /** parent — экран, на который вернуться после закрытия (может быть null). */
+    public AuroraClickGui(Screen parent) {
         super(Component.literal("Aurora"));
         this.theme = AuroraClient.theme();
+        this.parent = parent;
     }
 
     public static void playClick() {
@@ -158,7 +166,10 @@ public class AuroraClickGui extends Screen {
         search = new EditBox(this.font, 0, 0, SEARCH_W - 20, 16, Component.literal("Поиск"));
         search.setMaxLength(40);
         search.setBordered(false);
-        // только как обработчик ввода: текст поля рисует наш движок в стекле
+        // только как обработчик ввода: текст поля рисует наш движок в стекле.
+        // Рисовать сам EditBox нельзя — ванильный текст дублирует наш и
+        // «налезает» на него при масштабе окна != 1
+        search.setVisible(false);
         addWidget(search);
         setFocused(search);
         // повышаем силу блюра на время, пока меню открыто
@@ -219,7 +230,7 @@ public class AuroraClickGui extends Screen {
         float t = openAnim.update();
         if (closing) {
             if (openAnim.isDone() && openAnim.getTarget() == 0) {
-                super.onClose();
+                finishClose();
                 return;
             }
         }
@@ -252,12 +263,13 @@ public class AuroraClickGui extends Screen {
             search.setWidth(SEARCH_W - 20);
         }
 
-        if (theme.animations) {
-            g.pose().pushMatrix();
-            g.pose().translate(cx, cy);
-            g.pose().scale(scale, scale);
-            g.pose().translate(-cx, -cy);
-        }
+        // масштаб вписывания применяем всегда — даже при выключенных анимациях.
+        // Раньше окно рисовалось в натуральную величину, а мышь считалась
+        // по масштабу fit → на небольших экранах все клики «съезжали»
+        g.pose().pushMatrix();
+        g.pose().translate(cx, cy);
+        g.pose().scale(scale, scale);
+        g.pose().translate(-cx, -cy);
 
         // ===== фаза 1: формы =====
         drawWindowShapes(g, winX, winY, t);
@@ -275,9 +287,7 @@ public class AuroraClickGui extends Screen {
         drawBodyTexts(g);
         drawFooterTexts(g, winX, winY);
 
-        if (theme.animations) {
-            g.pose().popMatrix();
-        }
+        g.pose().popMatrix();
 
         super.render(g, mx, my, delta);
     }
@@ -345,6 +355,11 @@ public class AuroraClickGui extends Screen {
                 playClick();
                 themeTab = false;
                 tab = cat;
+                // сбрасываем поиск: иначе список модулей не сменится,
+                // пока в поиске остаётся текст («вкладка не переключается»)
+                if (search != null) {
+                    search.setValue("");
+                }
                 scrollTarget = 0;
                 tabAnim.snap(0);
                 tabAnim.to(1);
@@ -369,35 +384,39 @@ public class AuroraClickGui extends Screen {
         hits.add(new Hit(sx + 4, themeY, sw - 8, 22, -1, () -> {
             playClick();
             themeTab = true;
+            if (search != null) {
+                search.setValue("");
+            }
             scrollTarget = 0;
             tabAnim.snap(0);
             tabAnim.to(1);
         }));
 
-        // ===== цветовая схема: аккуратные кружки с отступами =====
-        int palY = themeY + 38;
-        int px = sx + 14;
-        for (String[] preset : Theme.PRESETS) {
+        // ===== цветовая схема: 2 ряда по 4 — всё строго внутри панели =====
+        int palY = themeY + 36;
+        for (int i = 0; i < Theme.PRESETS.length; i++) {
+            String[] preset = Theme.PRESETS[i];
+            int px = sx + 14 + (i % 4) * 24;
+            int py = palY + (i / 4) * 20;
             int c1 = (int) (0xFF000000L | Long.parseLong(preset[1], 16));
             boolean isActive = theme.accent == c1 && !theme.rainbow;
-            boolean hoverP = mouseX >= px - 3 && mouseX < px + 13 && mouseY >= palY - 3 && mouseY < palY + 13;
+            boolean hoverP = mouseX >= px - 4 && mouseX < px + 14 && mouseY >= py - 4 && mouseY < py + 14;
             if (hoverP) {
-                GfxEngine.circle(g, px + 5, palY + 5, 16, ColorUtil.rgba(255, 255, 255, 30));
+                GfxEngine.circle(g, px + 5, py + 5, 18, ColorUtil.rgba(255, 255, 255, 30));
             }
-            GfxEngine.circle(g, px + 5, palY + 5, 10, c1);
+            GfxEngine.circle(g, px + 5, py + 5, 10, c1);
             if (isActive) {
-                GfxEngine.ring(g, px + 5, palY + 5, 15, ColorUtil.rgb(255, 255, 255), 1.2f);
+                GfxEngine.ring(g, px + 5, py + 5, 15, ColorUtil.rgb(255, 255, 255), 1.2f);
             }
             final int f1 = c1;
             final int f2 = (int) (0xFF000000L | Long.parseLong(preset[2], 16));
-            hits.add(new Hit(px - 3, palY - 3, 16, 16, 0, () -> {
+            hits.add(new Hit(px - 4, py - 4, 18, 18, 0, () -> {
                 theme.accent = f1;
                 theme.accent2 = f2;
                 theme.rainbow = false;
                 playClick();
                 AuroraConfig.save();
             }));
-            px += 16;
         }
 
         // ===== профиль =====
@@ -500,7 +519,7 @@ public class AuroraClickGui extends Screen {
                 hudHover ? ColorUtil.alpha(theme.accentNow(), 180) : ColorUtil.rgba(255, 255, 255, (int) (24 * t)), 1f);
         hits.add(new Hit(hudX, bodyY + 2, hudW, 20, 0, () -> {
             playClick();
-            Minecraft.getInstance().setScreen(new HudEditorScreen());
+            Minecraft.getInstance().setScreen(new HudEditorScreen(this));
         }));
 
         // строка поиска: клик по полю возвращает фокус ввода
@@ -530,8 +549,12 @@ public class AuroraClickGui extends Screen {
             boolean focused = search.isFocused();
             float textX = searchFieldX() + 10;
             float textY = bodyY + 8;
-            if (value.isEmpty() && !focused) {
+            if (value.isEmpty()) {
+                // плейсхолдер виден и в фокусе — пустое поле больше не «исчезает»
                 RenderUtil.drawText(g, font, "Поиск...", textX, textY, ColorUtil.rgba(235, 236, 244, 95), theme);
+                if (focused && System.currentTimeMillis() % 1000 < 500) {
+                    GfxEngine.rounded(g, textX, textY + 0.5f, 1, 8, 0.5f, ColorUtil.alpha(theme.accentNow(), 220));
+                }
             } else {
                 RenderUtil.drawText(g, font, RenderUtil.ellipsize(font, value, SEARCH_W - 18, theme),
                         textX, textY, theme.textPrimary(), theme);
@@ -591,7 +614,7 @@ public class AuroraClickGui extends Screen {
             int y = cardsTop + colYs[col] - (int) scrollPos;
             float et = expandT(m);
 
-            List<String> desc = RenderUtil.wrapLimited(font, m.description, colW - 24, theme, 2);
+            List<String> desc = RenderUtil.wrapLimited(font, m.description, colW - 64, theme, 2);
             int headerH = 22 + Math.max(1, desc.size()) * 10;
             int rowsH = settingsHeight(m);
             int h = headerH + 6 + Math.round(rowsH * et);
@@ -739,8 +762,10 @@ public class AuroraClickGui extends Screen {
             float ratio = (float) (bodyH - 28) / (maxScroll + bodyH - 28);
             int thumbH = Math.max(18, (int) (trackH * ratio));
             int thumbY = bodyY + 30 + (int) ((trackH - thumbH) * (scrollPos / (float) maxScroll));
+            GfxEngine.rounded(g, bodyX + bodyW - 4, bodyY + 30, 3, trackH, 1.5f,
+                    ColorUtil.rgba(255, 255, 255, 16));
             GfxEngine.rounded(g, bodyX + bodyW - 4, thumbY, 3, thumbH, 1.5f,
-                    ColorUtil.alpha(theme.accentNow(), 130));
+                    ColorUtil.alpha(theme.accentNow(), 150));
         }
     }
 
@@ -752,7 +777,13 @@ public class AuroraClickGui extends Screen {
             }
         } else {
             if (cards.isEmpty()) {
-                RenderUtil.drawText(g, font, "Ничего не найдено", bodyX + 12, bodyY + 40, theme.textSecondary(), theme);
+                boolean searching = search != null && !search.getValue().isEmpty();
+                RenderUtil.drawText(g, font, searching ? "Ничего не найдено" : "Здесь пока пусто",
+                        bodyX + 12, bodyY + 40, theme.textSecondary(), theme);
+                if (searching) {
+                    RenderUtil.drawText(g, font, "Очистите поиск или смените вкладку слева",
+                            bodyX + 12, bodyY + 52, ColorUtil.alpha(theme.textSecondary(), 120), theme);
+                }
             }
             for (Card card : cards) {
                 if (card.y + card.h < bodyY || card.y > bodyY + bodyH + 10) {
@@ -1147,7 +1178,7 @@ public class AuroraClickGui extends Screen {
     private void drawFooterTexts(GuiGraphics g, int winX, int winY) {
         int footY = winY + WIN_H - FOOTER_H + 3;
         RenderUtil.drawText(g, font, "ЛКМ — вкл/выкл · ПКМ — настройки · Колесо — прокрутка",
-                winX + 16, footY + 6, theme.textSecondary(), theme);
+                bodyX + 2, footY + 6, theme.textSecondary(), theme);
         int btnX = winX + WIN_W - 14;
         String save = "Сохранить";
         int saveW = RenderUtil.width(font, save, theme) + 18;
@@ -1184,7 +1215,9 @@ public class AuroraClickGui extends Screen {
         mouseX = Math.round((float) (e.x() - cx) / s + cx);
         mouseY = Math.round((float) (e.y() - cy) / s + cy);
         if (listeningBind != null) {
-            return true; // ждём клавишу
+            // клик вне кнопки бинда отменяет захват — раньше клик просто
+            // «проглатывался» и меню казалось замороженным
+            listeningBind = null;
         }
         int btn = e.button();
         for (int i = hits.size() - 1; i >= 0; i--) {
@@ -1277,12 +1310,21 @@ public class AuroraClickGui extends Screen {
 
     private void closeAnimated() {
         if (closing) {
-            super.onClose();
+            finishClose();
             return;
         }
         closing = true;
         openAnim.to(0);
         openAnim.snap(Math.max(0.02f, openAnim.get()));
+    }
+
+    /** Полное закрытие: возвращаемся на родительский экран, если он есть. */
+    private void finishClose() {
+        if (parent != null) {
+            this.minecraft.setScreen(parent);
+        } else {
+            super.onClose();
+        }
     }
 
     @Override
@@ -1300,6 +1342,15 @@ public class AuroraClickGui extends Screen {
         } catch (Exception ignored) {
         }
         super.removed();
+    }
+
+    /** Смоук-тест вкладки «Тема» (AURORA_TEST_THEME=1) — для скриншотов. */
+    public void debugOpenThemeTab() {
+        themeTab = true;
+        scrollTarget = 0;
+        scrollPos = 0;
+        tabAnim.snap(1);
+        openAnim.snap(1);
     }
 
     @Override

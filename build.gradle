@@ -15,6 +15,14 @@ repositories {
 loom {
         splitEnvironmentSourceSets()
 
+        runs {
+                client {
+                        client()
+                        // размер окна для локальных тестов/скриншотов
+                        programArgs "--width", "1280", "--height", "800"
+                }
+        }
+
         mods {
                 "aurora" {
                         sourceSet sourceSets.main

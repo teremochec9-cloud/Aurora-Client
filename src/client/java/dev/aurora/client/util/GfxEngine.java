@@ -194,15 +194,11 @@ public final class GfxEngine {
         c.pose = new Matrix3x2f(g.pose());
         float[] s = currentScissor();
         if (s != null) {
-            // scissor задаётся в gui-координатах — применяем текущую позу
-            Matrix3x2fc pose = c.pose;
-            float x0 = s[0], y0 = s[1], x1 = s[0] + s[2], y1 = s[1] + s[3];
-            float ax0 = pose.m00() * x0 + pose.m10() * y0 + pose.m20();
-            float ay0 = pose.m01() * x0 + pose.m11() * y0 + pose.m21();
-            float ax1 = pose.m00() * x1 + pose.m10() * y1 + pose.m20();
-            float ay1 = pose.m01() * x1 + pose.m11() * y1 + pose.m21();
-            c.scissor(new float[]{Math.min(ax0, ax1), Math.min(ay0, ay1),
-                    Math.abs(ax1 - ax0), Math.abs(ay1 - ay0)});
+            // scissor хранится в сырых gui-координатах: NanoVG сам применит к
+            // нему текущую матрицу воспроизведения (поза * guiScale) при
+            // отрисовке. Раньше scissor трансформировался дважды — области
+            // «уезжали» и текст настроек вылезал за границы карточек
+            c.scissor(new float[]{s[0], s[1], s[2], s[3]});
         } else {
             c.scissor(null);
         }
@@ -243,6 +239,18 @@ public final class GfxEngine {
 
     private static float[] currentScissor() {
         return SCISSOR_STACK.peek();
+    }
+
+    /** Масштаб GUI: сколько физических пикселей в одном gui-пикселе. */
+    private static float frameGuiScale() {
+        try {
+            Minecraft mc = Minecraft.getInstance();
+            if (mc != null && mc.getWindow() != null) {
+                return Math.max(1f, mc.getWindow().getGuiScale());
+            }
+        } catch (Throwable ignored) {
+        }
+        return 1f;
     }
 
     /* ------------------------------------------------------------------ */
@@ -415,6 +423,7 @@ public final class GfxEngine {
             return;
         }
         int guiScale = Math.max(1, mc.getWindow().getGuiScale());
+        currentReplayScale = guiScale;
         // Minecraft может оставить привязанным буфер выгрузки пикселей (PBO) —
         // с ним атлас шрифтов NanoVG заливается пустым и текст пропадает
         GL15.glBindBuffer(GL31.GL_PIXEL_UNPACK_BUFFER, 0);
@@ -469,17 +478,26 @@ public final class GfxEngine {
                 target.getColorTextureView(), OptionalInt.empty());
     }
 
+    /** Масштаб gui для кадров, проигрываемых сейчас (см. replay). */
+    private static float currentReplayScale = 1f;
+
     private static void replay(Cmd c) {
         Matrix3x2fc p = c.pose;
         if (c.sw == 0) {
             return; // пустая scissor-область — команда полностью отсечена
         }
-        if (p.m00() * p.m11() - p.m01() * p.m10() == 0f) {
+        float gs = currentReplayScale;
+        if (p.m00() * gs * p.m11() * gs - p.m01() * gs * p.m10() * gs == 0f) {
             return; // вырожденная поза
         }
         NanoVG.nvgSave(ctx);
         try {
-            NanoVG.nvgTransform(ctx, p.m00(), p.m01(), p.m10(), p.m11(), p.m20(), p.m21());
+            // Поза GuiGraphics содержит только координаты gui (без guiScale),
+            // а NanoVG рисует прямо в физические пиксели фреймбуфера —
+            // поэтому домножаем матрицу на guiScale, иначе при масштабе
+            // интерфейса 2+ весь интерфейс Aurora сжимается в угол экрана
+            NanoVG.nvgTransform(ctx, p.m00() * gs, p.m01() * gs, p.m10() * gs, p.m11() * gs,
+                    p.m20() * gs, p.m21() * gs);
             if (c.sw > 0) {
                 NanoVG.nvgIntersectScissor(ctx, c.sx, c.sy, c.sw, c.sh);
             }

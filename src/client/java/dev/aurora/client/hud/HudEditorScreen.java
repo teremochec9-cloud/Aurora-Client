@@ -21,6 +21,8 @@ import org.lwjgl.glfw.GLFW;
  */
 public class HudEditorScreen extends Screen {
     private final Theme theme;
+    /** Экран, на который вернуться при закрытии (обычно — меню клиента). */
+    private final Screen parent;
     private HudModule dragging;
     private float grabDX, grabDY;
     private int mouseX, mouseY;
@@ -30,14 +32,26 @@ public class HudEditorScreen extends Screen {
     private int[] resetBtn;
 
     public HudEditorScreen() {
+        this(null);
+    }
+
+    public HudEditorScreen(Screen parent) {
         super(Component.literal("HUD Editor"));
         this.theme = AuroraClient.theme();
+        this.parent = parent;
     }
 
     @Override
     public void added() {
         appear.snap(theme.animations ? 0 : 1);
         appear.to(1);
+    }
+
+    @Override
+    public void tick() {
+        // без обновления каждый тик анимация появления застывала на нуле:
+        // альфа панели и подсказки оставалась 0 и текст был невидим
+        appear.update();
     }
 
     @Override
@@ -57,7 +71,7 @@ public class HudEditorScreen extends Screen {
                 hud.x = Math.max(0f, Math.min(1f, nx));
                 hud.y = Math.max(0f, Math.min(1f, ny));
             }
-            hud.render(g, Minecraft.getInstance().getDeltaTracker(), theme, Minecraft.getInstance());
+            hud.renderEditor(g, Minecraft.getInstance().getDeltaTracker(), theme, Minecraft.getInstance());
             hud.renderEditorFrame(g, theme, over, dragging == hud);
         }
 
@@ -75,6 +89,7 @@ public class HudEditorScreen extends Screen {
 
     private static final String HINT_FULL = "ЛКМ — перетащить · Колесо — масштаб · ПКМ — фон · ESC — готово";
     private static final String HINT_SHORT = "ЛКМ — тянуть · Колесо — размер · ПКМ — фон · ESC";
+    private static final String HINT_MINI = "ЛКМ · Колесо · ПКМ · ESC";
 
     private void drawBottomBarShapes(GuiGraphics g) {
         float at = Animation.smooth(appear.get());
@@ -120,8 +135,12 @@ public class HudEditorScreen extends Screen {
         int barY = this.height - barH - 8;
 
         int textY = barY + barH / 2 - RenderUtil.fontHeight(font) / 2 + 1;
+        // подсказка гарантированно не заходит на кнопку сброса:
+        // выбираем самый короткий вариант и дополнительно обрезаем
+        int avail = this.width - 16 - 20 - titleW - 16 - 14 - rw;
+        String hintSafe = RenderUtil.ellipsize(font, hint, Math.max(40, avail), theme);
         RenderUtil.drawTextBold(g, font, "HUD-редактор", barX + pad, textY, theme.textPrimary(), theme);
-        RenderUtil.drawText(g, font, hint, barX + pad + titleW + 16, textY,
+        RenderUtil.drawText(g, font, hintSafe, barX + pad + titleW + 16, textY,
                 ColorUtil.alpha(theme.textSecondary(), (int) (255 * at)), theme);
 
         int rx = barX + barW - pad - rw;
@@ -138,7 +157,10 @@ public class HudEditorScreen extends Screen {
         if (RenderUtil.width(font, HINT_FULL, theme) <= available) {
             return HINT_FULL;
         }
-        return HINT_SHORT;
+        if (RenderUtil.width(font, HINT_SHORT, theme) <= available) {
+            return HINT_SHORT;
+        }
+        return HINT_MINI;
     }
 
     /** Фон редактора: настоящий блюр + затемнение (ровно 1 раз за кадр). */
@@ -258,6 +280,12 @@ public class HudEditorScreen extends Screen {
     @Override
     public boolean shouldCloseOnEsc() {
         return true;
+    }
+
+    @Override
+    public void onClose() {
+        // возвращаемся туда, откуда открыли редактор (минуя «пустой» экран)
+        this.minecraft.setScreen(parent != null ? parent : null);
     }
 
     @Override

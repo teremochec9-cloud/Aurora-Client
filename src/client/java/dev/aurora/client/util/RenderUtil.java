@@ -221,25 +221,39 @@ public final class RenderUtil {
 
     /** Градиентный текст: каждый символ интерполируется между двумя цветами. */
     public static int drawGradientText(GuiGraphics g, Font font, String s, float x, float y, int colorA, int colorB, Theme theme) {
+        if (s == null || s.isEmpty()) {
+            return 0;
+        }
         if (theme.customFont && GfxEngine.isAvailable()) {
             float total = GfxEngine.textWidth(s);
+            int a = ColorUtil.alphaI(colorA);
+            // одна общая тень на всю строку: если рисовать тень для каждого
+            // символа отдельно, тень соседней буквы ложится поверх соседней
+            // буквы и текст выглядит «слипшимся»
+            GfxEngine.drawText(g, x + 1, y + 1 + GfxEngine.TEXT_BASELINE, s,
+                    GfxEngine.TEXT_SIZE, ColorUtil.alpha(0x05060A, a * 45 / 100), false);
             float cx = x;
             for (int i = 0; i < s.length(); i++) {
                 String ch = String.valueOf(s.charAt(i));
                 float chw = GfxEngine.textWidth(ch);
                 float t = total <= 0 ? 0 : (cx - x) / total;
-                drawText(g, font, ch, cx, y, ColorUtil.lerp(colorA, colorB, t), theme);
+                GfxEngine.drawText(g, cx, y + GfxEngine.TEXT_BASELINE, ch,
+                        GfxEngine.TEXT_SIZE, ColorUtil.lerp(colorA, colorB, t), false);
                 cx += chw;
             }
             return Math.round(total);
         }
         int total = width(font, s, theme);
+        // ванильная ветвь: сначала вся тень, затем цветные символы
+        if (total > 0) {
+            vanilla(g, font, s, x + 1, y + 1, ColorUtil.alpha(0x05060A, ColorUtil.alphaI(colorA) * 45 / 100));
+        }
         float cx = x;
         for (int i = 0; i < s.length(); i++) {
             String ch = String.valueOf(s.charAt(i));
             int chw = width(font, ch, theme);
             float t = total <= 0 ? 0 : (cx - x) / total;
-            drawText(g, font, ch, cx, y, ColorUtil.lerp(colorA, colorB, t), theme);
+            vanilla(g, font, ch, cx, y, ColorUtil.lerp(colorA, colorB, t));
             cx += chw;
         }
         return total;

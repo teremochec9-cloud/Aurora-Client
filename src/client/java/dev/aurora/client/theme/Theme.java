@@ -15,7 +15,7 @@ import java.nio.file.Path;
  */
 public class Theme {
     public static final String CLIENT_NAME = "Aurora";
-    public static final String CLIENT_VERSION = "1.2";
+    public static final String CLIENT_VERSION = "1.2.1";
     public static final String MC_VERSION = "1.21.11";
 
     /** Основной акцентный цвет (по умолчанию — фиолетовый, как на референсе). */
