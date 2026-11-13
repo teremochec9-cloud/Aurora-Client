@@ -39,8 +39,6 @@ public class HudEditorScreen extends Screen {
     private long lastFrameNanos = System.nanoTime();
     /** Целевой масштаб при прокрутке колесом (элемент плавно его достигает). */
     private final Map<HudModule, Float> scaleTargets = new HashMap<>();
-    /** Анимация бейджа «×N.NN»: плавное появление/скрытие. */
-    private final Map<HudModule, Animation> badgeAnims = new HashMap<>();
 
     /** Кнопка «Сбросить позиции» [x, y, w, h]. */
     private int[] resetBtn;
@@ -85,8 +83,8 @@ public class HudEditorScreen extends Screen {
         this.mouseY = my;
         float dt = frameDelta();
 
-        // фоновая сетка редактора (появляется вместе с экраном)
-        drawGrid(g);
+        // красивая сетка редактора (под элементами) + перекрестие курсора
+        drawEditorGrid(g);
 
         // элементы + рамки (формы)
         for (Module m : ModuleManager.all()) {
@@ -97,24 +95,16 @@ public class HudEditorScreen extends Screen {
             if (dragging == hud) {
                 // таргет драга — пиксель левого края, переводим в долю с учётом
                 // якоря: при привязке справа x хранит правую кромку, прямой
-                // перенос пикселя в долю поехал бы в обратную сторону
-                int rawX = (int) (mx - grabDX);
-                int rawY = (int) (my - grabDY);
-                // прилипание к сетке редактора: край, оказавшийся ближе 4px
-                // к линии сетки (шаг 10px), прилипает к ней — позиции выравниваются
-                int snapStep = 10;
-                int snapX = Math.round(rawX / (float) snapStep) * snapStep;
-                int snapY = Math.round(rawY / (float) snapStep) * snapStep;
-                if (Math.abs(snapX - rawX) <= 4) {
-                    rawX = snapX;
+                // перенос пикселя в долю поехал бы в обратную сторону.
+                // Привязка к сетке: шаг 5 gui-пикселей (как в современных клиентах)
+                int tlPx = Math.round(mx - grabDX);
+                int tlPy = Math.round(my - grabDY);
+                if (theme.hudGrid) {
+                    tlPx = Math.round(tlPx / 5f) * 5;
+                    tlPy = Math.round(tlPy / 5f) * 5;
                 }
-                if (Math.abs(snapY - rawY) <= 4) {
-                    rawY = snapY;
-                }
-                float tx = Math.max(0f, Math.min(1f,
-                        hud.fractionForTL(rawX, g.guiWidth())));
-                float ty = Math.max(0f, Math.min(1f,
-                        hud.fractionForTL_Y(rawY, g.guiHeight())));
+                float tx = Math.max(0f, Math.min(1f, hud.fractionForTL(tlPx, g.guiWidth())));
+                float ty = Math.max(0f, Math.min(1f, hud.fractionForTL_Y(tlPy, g.guiHeight())));
                 float k = 1f - (float) Math.exp(-16f * dt);
                 hud.x += (tx - hud.x) * k;
                 hud.y += (ty - hud.y) * k;
@@ -136,11 +126,6 @@ public class HudEditorScreen extends Screen {
             }
             hud.renderEditor(g, Minecraft.getInstance().getDeltaTracker(), theme, Minecraft.getInstance());
             hud.renderEditorFrame(g, theme, over, dragging == hud);
-            // направляющие при драге + бейдж масштаба
-            if (dragging == hud) {
-                drawAnchorGuides(g, hud);
-            }
-            drawScaleBadge(g, hud); // сам решает, виден ли бейдж (по scaleTargets)
         }
 
         drawBottomBarShapes(g);
@@ -159,114 +144,51 @@ public class HudEditorScreen extends Screen {
     }
 
     /* ------------------------------------------------------------------ */
-    /*  Сетка, направляющие и бейдж масштаба                              */
+    /*  Сетка редактора: мелкая линия + акцентные мажорные линии +        */
+    /*  перекрестие курсора — как в современных HUD-редакторах            */
     /* ------------------------------------------------------------------ */
 
-    /**
-     * Фоновая сетка редактора: мягкие точки с шагом 20px, акцентные
-     * «крестики» на крупных узлах каждые 100px и оси по центру.
-     * Раньше сетка была сплошными линиями — рябила и спорила с элементами.
-     */
-    private void drawGrid(GuiGraphics g) {
+    /** Смоук-тест полигонов: AURORA_PTS_DEBUG=1. */
+    private static final boolean PTS_DEBUG_SHAPE = "1".equals(System.getenv("AURORA_PTS_DEBUG"));
+    /** Шаг сетки (gui-пиксели). */
+    private static final int GRID_CELL = 10;
+    /** Каждая 5-я линия — мажорная (50 px). */
+    private static final int GRID_MAJOR = 5;
+
+    private void drawEditorGrid(GuiGraphics g) {
+        // смоук-тест полигонов: звезда (вогнутый, 10 вершин) и треугольник (выпуклый)
+        if (PTS_DEBUG_SHAPE) {
+            GfxEngine.pathFill(g, new float[]{
+                    470, 295, 475.9f, 311.9f, 493.8f, 312.3f, 479.5f, 323.1f,
+                    484.7f, 340.2f, 470, 330, 455.3f, 340.2f, 460.5f, 323.1f,
+                    446.2f, 312.3f, 464.1f, 311.9f,
+            }, 10, ColorUtil.rgba(255, 80, 80, 220));
+            GfxEngine.pathFill(g, new float[]{
+                    540, 300, 580, 300, 560, 340,
+            }, 3, ColorUtil.rgba(80, 255, 120, 220));
+        }
+        if (!theme.hudGrid) {
+            return;
+        }
         float at = Animation.smooth(appear.get());
-        if (at < 0.05f) {
+        if (at < 0.02f) {
             return;
         }
         int w = this.width;
         int h = this.height;
-        int step = 20;
-        int majorEvery = 5; // каждый 5-й узел = 100px
-        // мягкие точки сетки
-        int dotA = (int) (30 * at);
-        for (int x = 0; x <= w; x += step) {
-            boolean majorX = (x / step) % majorEvery == 0;
-            for (int y = 0; y <= h; y += step) {
-                boolean major = majorX && (y / step) % majorEvery == 0;
-                if (major) {
-                    // крупный узел — акцентная точка с «крестиком»
-                    int a = (int) (85 * at);
-                    int accent = theme.accentNow();
-                    GfxEngine.rounded(g, x - 2.5f, y - 0.6f, 6, 1.2f, 0.6f, ColorUtil.alpha(accent, a));
-                    GfxEngine.rounded(g, x - 0.6f, y - 2.5f, 1.2f, 6, 0.6f, ColorUtil.alpha(accent, a));
-                } else {
-                    GfxEngine.circle(g, x, y, 1.7f, ColorUtil.rgba(255, 255, 255, dotA));
-                }
-            }
+        int minor = ColorUtil.rgba(255, 255, 255, (int) (13 * at));
+        int major = ColorUtil.alpha(theme.accentNow(), (int) (26 * at));
+        for (int x = 0, i = 0; x <= w; x += GRID_CELL, i++) {
+            GfxEngine.rounded(g, x, 0, 1, h, 0, i % GRID_MAJOR == 0 ? major : minor);
         }
-        // центральные оси — акцентом темы с мягким основанием
-        int axisA = (int) (58 * at);
-        int accent = theme.accentNow();
-        GfxEngine.rounded(g, w / 2f - 1.5f, 0, 3, h, 1.5f, ColorUtil.alpha(accent, axisA / 3));
-        GfxEngine.rounded(g, w / 2f, 0, 1, h, 0.5f, ColorUtil.alpha(accent, axisA));
-        GfxEngine.rounded(g, 0, h / 2f - 1.5f, w, 3, 1.5f, ColorUtil.alpha(accent, axisA / 3));
-        GfxEngine.rounded(g, 0, h / 2f, w, 1, 0.5f, ColorUtil.alpha(accent, axisA));
-    }
-
-    /** Направляющие при драге: подсветка совпадения краёв/центра с осями и краями экрана. */
-    private void drawAnchorGuides(GuiGraphics g, HudModule hud) {
-        int[] bb = hud.screenBBox(this.width, this.height);
-        int cx = bb[0] + bb[2] / 2;
-        int cy = bb[1] + bb[3] / 2;
-        int snap = 6;
-        if (Math.abs(cx - this.width / 2) <= snap) {
-            vGuide(g, this.width / 2);
+        for (int y = 0, i = 0; y <= h; y += GRID_CELL, i++) {
+            GfxEngine.rounded(g, 0, y, w, 1, 0, i % GRID_MAJOR == 0 ? major : minor);
         }
-        if (Math.abs(bb[0]) <= snap) {
-            vGuide(g, 0);
-        }
-        if (Math.abs(bb[0] + bb[2] - this.width) <= snap) {
-            vGuide(g, this.width - 1);
-        }
-        if (Math.abs(cy - this.height / 2) <= snap) {
-            hGuide(g, this.height / 2);
-        }
-        if (Math.abs(bb[1]) <= snap) {
-            hGuide(g, 0);
-        }
-        if (Math.abs(bb[1] + bb[3] - this.height) <= snap) {
-            hGuide(g, this.height - 1);
-        }
-    }
-
-    /** Вертикальная направляющая: широкое мягкое основание + яркая жила. */
-    private void vGuide(GuiGraphics g, int x) {
-        int accent = theme.accentNow();
-        GfxEngine.rounded(g, x - 1, 0, 3, this.height, 1.5f, ColorUtil.alpha(accent, 70));
-        GfxEngine.rounded(g, x, 0, 1, this.height, 0.5f, ColorUtil.alpha(accent, 220));
-    }
-
-    /** Горизонтальная направляющая. */
-    private void hGuide(GuiGraphics g, int y) {
-        int accent = theme.accentNow();
-        GfxEngine.rounded(g, 0, y - 1, this.width, 3, 1.5f, ColorUtil.alpha(accent, 70));
-        GfxEngine.rounded(g, 0, y, this.width, 1, 0.5f, ColorUtil.alpha(accent, 220));
-    }
-
-    /** Бейдж «×1.25» над элементом во время плавного изменения масштаба. */
-    private void drawScaleBadge(GuiGraphics g, HudModule hud) {
-        // плавное появление/скрытие бейджа: цель зависит от того,
-        // меняется ли сейчас масштаб элемента
-        Animation anim = badgeAnims.computeIfAbsent(hud, k -> new Animation(0, 14));
-        float ba = anim.apply(theme.animations && scaleTargets.containsKey(hud) ? 1f : 0f);
-        if (ba < 0.03f) {
-            return;
-        }
-        String text = "×" + String.format("%.2f", hud.scale.get());
-        int[] bb = hud.screenBBox(this.width, this.height);
-        int wpx = RenderUtil.width(font, text, theme) + 12;
-        int bx = bb[0] + bb[2] / 2 - wpx / 2;
-        int by = Math.max(2, bb[1] - 17);
-        float pop = Animation.easeOutBack(Animation.smooth(ba));
-        g.pose().pushMatrix();
-        g.pose().translate(bx + wpx / 2f, by + 6.5f);
-        float ps = 0.85f + 0.15f * pop;
-        g.pose().scale(ps, ps);
-        g.pose().translate(-(bx + wpx / 2f), -(by + 6.5f));
-        GfxEngine.glow(g, bx - 2, by - 2, wpx + 4, 17, 6.5f, 4f, ColorUtil.alpha(theme.accentNow(), (int) (90 * ba)));
-        GfxEngine.rounded(g, bx, by, wpx, 13, 6.5f, ColorUtil.alpha(theme.accentNow(), (int) (205 * ba)));
-        RenderUtil.drawCenteredText(g, font, text, bb[0] + bb[2] / 2f, by + 3,
-                ColorUtil.rgba(255, 255, 255, (int) (255 * ba)), theme);
-        g.pose().popMatrix();
+        // перекрестие под курсором — акцентное, с мягким пятном
+        int cross = ColorUtil.alpha(theme.accentNow(), (int) (60 * at));
+        GfxEngine.rounded(g, mouseX, 0, 1, h, 0, cross);
+        GfxEngine.rounded(g, 0, mouseY, w, 1, 0, cross);
+        GfxEngine.circle(g, mouseX, mouseY, 10, ColorUtil.alpha(theme.accentNow(), (int) (26 * at)));
     }
 
     /* ------------------------------------------------------------------ */
@@ -274,9 +196,9 @@ public class HudEditorScreen extends Screen {
     /*  помещался целиком — без обрезки троеточием                        */
     /* ------------------------------------------------------------------ */
 
-    private static final String HINT_FULL = "ЛКМ — перетащить · Колесо — масштаб · ПКМ — фон · ESC — готово";
-    private static final String HINT_SHORT = "ЛКМ — тянуть · Колесо — размер · ПКМ — фон · ESC";
-    private static final String HINT_MINI = "ЛКМ · Колесо · ПКМ · ESC";
+    private static final String HINT_FULL = "ЛКМ — перетащить · Колесо — масштаб · ПКМ — фон · G — сетка · ESC — готово";
+    private static final String HINT_SHORT = "ЛКМ — тянуть · Колесо — размер · ПКМ — фон · G — сетка · ESC";
+    private static final String HINT_MINI = "ЛКМ · Колесо · ПКМ · G · ESC";
 
     private void drawBottomBarShapes(GuiGraphics g) {
         float at = Animation.smooth(appear.get());
@@ -374,11 +296,25 @@ public class HudEditorScreen extends Screen {
             if (m instanceof HudModule hud) {
                 hud.x = defaultX(hud);
                 hud.y = defaultY(hud);
-                hud.anchorX = 0;
-                hud.anchorY = 0;
+                // якоря восстанавливаем к заводским — у части элементов они
+                // нестандартные (Часы — центр, Сторона света — правый край),
+                // сброс в (0,0) уезжал их за экран (баг 1.0.5)
+                hud.anchorX = defaultAnchorX(hud);
+                hud.anchorY = defaultAnchorY(hud);
             }
         }
         AuroraConfig.save();
+    }
+
+    private int defaultAnchorX(HudModule hud) {
+        if (hud instanceof DirectionHud) return 2;
+        if (hud instanceof ClockHud) return 1;
+        return 0;
+    }
+
+    private int defaultAnchorY(HudModule hud) {
+        if (hud instanceof KeystrokesHud) return 1;
+        return 0;
     }
 
     private float defaultX(HudModule hud) {
@@ -544,6 +480,12 @@ public class HudEditorScreen extends Screen {
             onClose();
             return true;
         }
+        // G — тумблер сетки и привязки
+        if (e.key() == GLFW.GLFW_KEY_G) {
+            theme.hudGrid = !theme.hudGrid;
+            AuroraConfig.markDirty();
+            return true;
+        }
         return super.keyPressed(e);
     }
 
@@ -560,6 +502,12 @@ public class HudEditorScreen extends Screen {
 
     @Override
     public void removed() {
+        // докидываем недоигранную анимацию масштаба: иначе при быстром ESC
+        // элемент сохранялся с промежуточным масштабом (баг 1.0.5)
+        for (var entry : scaleTargets.entrySet()) {
+            entry.getKey().scale.set(entry.getValue());
+        }
+        scaleTargets.clear();
         AuroraConfig.save();
         super.removed();
     }

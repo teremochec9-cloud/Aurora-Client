@@ -1,6 +1,7 @@
 package dev.aurora.client.util;
 
 import com.mojang.blaze3d.pipeline.RenderTarget;
+import com.mojang.blaze3d.textures.GpuTextureView;
 import com.mojang.blaze3d.systems.RenderPass;
 import com.mojang.blaze3d.systems.RenderSystem;
 import net.minecraft.client.Minecraft;
@@ -12,6 +13,7 @@ import org.lwjgl.nanovg.NanoVGGL3;
 import org.lwjgl.nanovg.NVGColor;
 import org.lwjgl.nanovg.NVGPaint;
 import org.lwjgl.opengl.GL11;
+import org.lwjgl.opengl.GL30;
 import org.lwjgl.opengl.GL13;
 import org.lwjgl.opengl.GL15;
 import org.lwjgl.opengl.GL31;
@@ -51,6 +53,8 @@ public final class GfxEngine {
 
     /** Диагностика движка: AURORA_NVG_DEBUG=1 рисует тестовые примитивы и пишет GL-ошибки. */
     private static final boolean DEBUG = "1".equals(System.getenv("AURORA_NVG_DEBUG"));
+    /** Диагностика полигонов: AURORA_PTS_DEBUG=1 логирует точки pathFill. */
+    private static final boolean PTS_DEBUG = "1".equals(System.getenv("AURORA_PTS_DEBUG"));
 
     /** Базовый размер шрифта (в gui-пикселях) — совпадает со строкой ванильного шрифта. */
     public static final float TEXT_SIZE = 9.0f;
@@ -65,6 +69,9 @@ public final class GfxEngine {
     private static int fontMedium = -1;
     private static int fontSemiBold = -1;
     private static boolean failed;
+    /** Диагностика: один раз залогировать параметры первого кадра. */
+    private static boolean loggedOnce;
+    /** Диагностика: масштаб позы первого кадра. */
     /** Байты шрифтов держим всё время жизни: NanoVG читает их напрямую. */
     private static ByteBuffer fontDataMedium;
     private static ByteBuffer fontDataSemiBold;
@@ -73,6 +80,8 @@ public final class GfxEngine {
     private static NVGColor colorA;
     private static NVGColor colorB;
     private static NVGPaint paint;
+    /** Переиспользуемый габарит команды для ручного scissor. */
+    private static final float[] BB = new float[4];
 
     private GfxEngine() {
     }
@@ -92,6 +101,7 @@ public final class GfxEngine {
         try {
             long created = NanoVGGL3.nvgCreate(NanoVGGL3.NVG_ANTIALIAS | NanoVGGL3.NVG_STENCIL_STROKES);
             if (created == 0) {
+                LOGGER.warn("Aurora: NanoVG со стенсил-заливкой недоступен — фолбэк на ANTIALIAS (вогнутые полигоны будут ломаться)");
                 created = NanoVGGL3.nvgCreate(NanoVGGL3.NVG_ANTIALIAS);
             }
             if (created == 0) {
@@ -162,20 +172,23 @@ public final class GfxEngine {
     private static final int RAMP = 4;   // виньетка (инвертированный box gradient)
     private static final int CIRCLE = 5;
     private static final int TEXT = 6;
+    private static final int RADIAL = 7;  // радиальный градиент (дым, свечение)
+    private static final int GRADIENT_H = 8; // горизонтальный градиент (виньетки по бокам)
+    private static final int ELLIPSE = 9;      // эллипс-контур (кольца Target ESP)
+    private static final int PATH_STROKE = 10; // ломаная/полигон — обводка
+    private static final int PATH_FILL = 11;   // ломаная/полигон — заливка
 
-    private static final List<Cmd> COMMANDS = new ArrayList<>(512);
-    /** Пул команд: переиспользуем объекты, чтобы не создавать сотни аллокаций в кадр. */
-    private static final ArrayDeque<Cmd> FREE_CMDS = new ArrayDeque<>();
+    /** Буфер команд: наполняется во время GUI-слоёв, проигрывается в flushFrame. */
+    private static List<Cmd> COMMANDS = new ArrayList<>(512);
+    /** Второй буфер: пока один наполняется, предыдущий проигрывается. */
+    private static List<Cmd> REPLAY = new ArrayList<>(512);
 
-    private static Cmd allocCmd() {
-        Cmd c = FREE_CMDS.pollFirst();
-        return c != null ? c : new Cmd();
-    }
+    /** Пул команд: за кадр рисуются сотни примитивов — переиспользуем объекты и матрицы. */
+    private static final ArrayDeque<Cmd> CMD_POOL = new ArrayDeque<>();
 
     private static final class Cmd {
         int type;
-        /** Переиспользуемая матрица (не выделяем новую на каждую команду). */
-        final Matrix3x2f pose = new Matrix3x2f();
+        Matrix3x2f pose;
         float sx, sy, sw, sh;   // scissor (или sw <= 0 — без отсечения)
         float x, y, w, h, r;
         float p1, p2;           // sigma / offsetY / thickness / fade
@@ -183,6 +196,10 @@ public final class GfxEngine {
         String text;
         boolean bold;
         float size;
+        // путь (PATH_STROKE / PATH_FILL): вершины и флаг замкнутости
+        float[] pts;
+        int ptCount;
+        boolean closed;
 
         void scissor(float[] s) {
             if (s == null) {
@@ -197,22 +214,31 @@ public final class GfxEngine {
     }
 
     private static Cmd cmd(int type, GuiGraphics g) {
-        Cmd c = allocCmd();
-        c.text = null;
+        Cmd c = CMD_POOL.poll();
+        if (c == null) {
+            c = new Cmd();
+        }
         c.type = type;
+        if (c.pose == null) {
+            c.pose = new Matrix3x2f();
+        }
         c.pose.set(g.pose());
+        c.text = null;
+        c.ptCount = 0;
+        c.closed = false;
         float[] s = currentScissor();
         if (s != null) {
-            // scissor хранится в сырых gui-координатах: NanoVG сам применит к
-            // нему текущую матрицу воспроизведения (поза * guiScale) при
-            // отрисовке. Раньше scissor трансформировался дважды — области
-            // «уезжали» и текст настроек вылезал за границы карточек
-            c.sx = s[0];
-            c.sy = s[1];
-            c.sw = s[2];
-            c.sh = s[3];
+            // scissor задаётся в gui-координатах — применяем текущую позу
+            Matrix3x2fc pose = c.pose;
+            float x0 = s[0], y0 = s[1], x1 = s[0] + s[2], y1 = s[1] + s[3];
+            float ax0 = pose.m00() * x0 + pose.m10() * y0 + pose.m20();
+            float ay0 = pose.m01() * x0 + pose.m11() * y0 + pose.m21();
+            float ax1 = pose.m00() * x1 + pose.m10() * y1 + pose.m20();
+            float ay1 = pose.m01() * x1 + pose.m11() * y1 + pose.m21();
+            c.scissor(new float[]{Math.min(ax0, ax1), Math.min(ay0, ay1),
+                    Math.abs(ax1 - ax0), Math.abs(ay1 - ay0)});
         } else {
-            c.sw = -1; // без отсечения
+            c.scissor(null);
         }
         COMMANDS.add(c);
         return c;
@@ -224,14 +250,26 @@ public final class GfxEngine {
 
     private static final ArrayDeque<float[]> SCISSOR_STACK = new ArrayDeque<>();
 
-    /** Включает отсечение (и в ванильном рендере, и для NanoVG-команд). */
+    /**
+     * Включает отсечение (и в ванильном рендере, и для NanoVG-команд).
+     *
+     * <p>Координаты клэмпятся в границы экрана: окно меню может быть больше
+     * экрана (fitScale &lt; 1), и тогда исходные rect'ы уходят в отрицательные
+     * координаты — ванильный GL-scissor с отрицательным origin'ом ломает
+     * рендер последующих слоёв (чёрные зоны на экране).</p>
+     */
     public static void pushScissor(GuiGraphics g, int x1, int y1, int x2, int y2) {
         if (x2 <= x1 || y2 <= y1) {
             SCISSOR_STACK.push(new float[]{x1, y1, 0, 0});
-            g.enableScissor(x1, y1, x1, y1);
             return;
         }
-        g.enableScissor(x1, y1, x2, y2);
+        // ВАЖНО: ванильный g.enableScissor не вызываем вовсе.
+        // 1) Весь контент Aurora рисуется через NanoVG уже ПОСЛЕ ванильных слоёв —
+        //    ванильное отсечение нам ничего не даёт.
+        // 2) Окно меню бывает больше экрана (fitScale < 1), rect'ы уходят
+        //    в отрицательные координаты — ванильный GL-scissor с отрицательным
+        //    origin'ом ломает рендер последующих слоёв (чёрные зоны на экране).
+        // Поэтому отсечение живёт только в собственном стеке движка.
         float[] rect = {x1, y1, x2 - x1, y2 - y1};
         float[] prev = SCISSOR_STACK.peek();
         if (prev != null) {
@@ -245,24 +283,11 @@ public final class GfxEngine {
     }
 
     public static void popScissor(GuiGraphics g) {
-        g.disableScissor();
         SCISSOR_STACK.poll();
     }
 
     private static float[] currentScissor() {
         return SCISSOR_STACK.peek();
-    }
-
-    /** Масштаб GUI: сколько физических пикселей в одном gui-пикселе. */
-    private static float frameGuiScale() {
-        try {
-            Minecraft mc = Minecraft.getInstance();
-            if (mc != null && mc.getWindow() != null) {
-                return Math.max(1f, mc.getWindow().getGuiScale());
-            }
-        } catch (Throwable ignored) {
-        }
-        return 1f;
     }
 
     /* ------------------------------------------------------------------ */
@@ -353,6 +378,21 @@ public final class GfxEngine {
         c.argb = argb;
     }
 
+    /** Горизонтальный линейный градиент на весь прямоугольник (left → right). */
+    public static void gradientH(GuiGraphics g, float x, float y, float w, float h, int left, int right) {
+        if (skip(w, h, left, right)) {
+            return;
+        }
+        Cmd c = cmd(GRADIENT_H, g);
+        c.x = x;
+        c.y = y;
+        c.w = w;
+        c.h = h;
+        c.r = 0;
+        c.argb = left;
+        c.argb2 = right;
+    }
+
     /** Гладкий круг диаметра d. */
     public static void circle(GuiGraphics g, float cx, float cy, float d, int argb) {
         if (d <= 0 || ColorUtil.alphaI(argb) <= 0) {
@@ -373,11 +413,214 @@ public final class GfxEngine {
         outline(g, cx - d / 2f, cy - d / 2f, d, d, d / 2f, argb, thickness);
     }
 
+    /** Контур эллипса (центр cx/cy, радиусы rx/ry) — кольца Target ESP. */
+    public static void ellipse(GuiGraphics g, float cx, float cy, float rx, float ry, int argb, float thickness) {
+        if (rx <= 0 || ry <= 0 || ColorUtil.alphaI(argb) <= 0) {
+            return;
+        }
+        Cmd c = cmd(ELLIPSE, g);
+        c.x = cx;
+        c.y = cy;
+        c.w = rx;
+        c.h = ry;
+        c.p1 = Math.max(0.25f, thickness);
+        c.argb = argb;
+    }
+
+    /** Обводка ломаной/полигона: xy — пары (x,y), pointCount — число вершин. */
+    public static void pathStroke(GuiGraphics g, float[] xy, int pointCount, int argb, float thickness, boolean closed) {
+        if (pointCount < 2 || ColorUtil.alphaI(argb) <= 0) {
+            return;
+        }
+        Cmd c = cmd(PATH_STROKE, g);
+        storePts(c, xy, pointCount, closed);
+        c.p1 = Math.max(0.25f, thickness);
+        c.argb = argb;
+    }
+
+    /** Заливка полигона: xy — пары (x,y), pointCount — число вершин. */
+    public static void pathFill(GuiGraphics g, float[] xy, int pointCount, int argb) {
+        if (pointCount < 3 || ColorUtil.alphaI(argb) <= 0) {
+            return;
+        }
+        if (isConvexPolygon(xy, pointCount)) {
+            Cmd c = cmd(PATH_FILL, g);
+            storePts(c, xy, pointCount, true);
+            c.argb = argb;
+        } else {
+            // ВАЖНО: NanoVG заливает полигон веером от первой вершины —
+            // вогнутые полигоны ломаются (самопересечения, «огрызки»).
+            // Разрезаем на выпуклые треугольники (ear clipping) — каждый
+            // рисуется отдельной командой и заливается корректно.
+            fillByEarClipping(g, xy, pointCount, argb);
+        }
+        if (PTS_DEBUG) {
+            LOGGER.info("pathFill n={} argb={} convex={}", pointCount,
+                    Integer.toHexString(argb), isConvexPolygon(xy, pointCount));
+        }
+    }
+
+    /** Копирует вершины в команду и считает bbox — чтобы грубая culling-оценка по x/y/w/h была корректной. */
+    private static void storePts(Cmd c, float[] xy, int pointCount, boolean closed) {
+        int need = pointCount * 2;
+        if (c.pts == null || c.pts.length < need) {
+            c.pts = new float[Math.max(32, need)];
+        }
+        System.arraycopy(xy, 0, c.pts, 0, need);
+        c.ptCount = pointCount;
+        c.closed = closed;
+        float minX = Float.MAX_VALUE, minY = Float.MAX_VALUE, maxX = -Float.MAX_VALUE, maxY = -Float.MAX_VALUE;
+        for (int i = 0; i < pointCount; i++) {
+            float px = xy[i * 2], py = xy[i * 2 + 1];
+            if (px < minX) minX = px;
+            if (py < minY) minY = py;
+            if (px > maxX) maxX = px;
+            if (py > maxY) maxY = py;
+        }
+        c.x = minX;
+        c.y = minY;
+        c.w = maxX - minX;
+        c.h = maxY - minY;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /*  Триангуляция вогнутых полигонов (ear clipping)                     */
+    /* ------------------------------------------------------------------ */
+
+    /** Буфер одной треугольной команды (переиспользуется, без аллокаций). */
+    private static final float[] TRI = new float[6];
+
+    private static float cross3(float ax, float ay, float bx, float by, float cx, float cy) {
+        return (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+    }
+
+    /** Выпуклость полигона: все повороты одного знака (нулевые игнорируем). */
+    private static boolean isConvexPolygon(float[] xy, int n) {
+        boolean hasPos = false;
+        boolean hasNeg = false;
+        for (int i = 0; i < n; i++) {
+            float ax = xy[((i + n - 1) % n) * 2], ay = xy[((i + n - 1) % n) * 2 + 1];
+            float bx = xy[i * 2], by = xy[i * 2 + 1];
+            float cx = xy[((i + 1) % n) * 2], cy = xy[((i + 1) % n) * 2 + 1];
+            float cr = cross3(ax, ay, bx, by, cx, cy);
+            if (cr > 1e-6f) hasPos = true;
+            if (cr < -1e-6f) hasNeg = true;
+            if (hasPos && hasNeg) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** Разрезает полигон на треугольники и рисует каждый отдельной командой. */
+    private static void fillByEarClipping(GuiGraphics g, float[] xy, int n, int argb) {
+        int[] idx = new int[n];
+        for (int i = 0; i < n; i++) {
+            idx[i] = i;
+        }
+        // ориентация контура: знак площади
+        float area2 = 0;
+        for (int i = 0; i < n; i++) {
+            int a = i, b = (i + 1) % n;
+            area2 += xy[a * 2] * xy[b * 2 + 1] - xy[b * 2] * xy[a * 2 + 1];
+        }
+        float areaSign = Math.signum(area2);
+        if (areaSign == 0) {
+            return; // вырожденный полигон
+        }
+        int count = n;
+        int guard = 0;
+        while (count > 2 && guard++ < 4 * n + 16) {
+            boolean clipped = false;
+            for (int i = 0; i < count; i++) {
+                int a = idx[(i + count - 1) % count];
+                int b = idx[i];
+                int c = idx[(i + 1) % count];
+                if (isEar(xy, a, b, c, idx, count, areaSign)) {
+                    emitTriangle(g, xy[a * 2], xy[a * 2 + 1], xy[b * 2], xy[b * 2 + 1], xy[c * 2], xy[c * 2 + 1], argb);
+                    for (int j = i; j < count - 1; j++) {
+                        idx[j] = idx[j + 1];
+                    }
+                    count--;
+                    clipped = true;
+                    break;
+                }
+            }
+            if (!clipped) {
+                break; // числовая деградация — рисуем остаток веером (лучше, чем ничего)
+            }
+        }
+        if (count == 3) {
+            emitTriangle(g, xy[idx[0] * 2], xy[idx[0] * 2 + 1],
+                    xy[idx[1] * 2], xy[idx[1] * 2 + 1],
+                    xy[idx[2] * 2], xy[idx[2] * 2 + 1], argb);
+        }
+    }
+
+    /** Ушко: вершина b выпуклая и треугольник abc не содержит других вершин. */
+    private static boolean isEar(float[] xy, int a, int b, int c, int[] idx, int count, float areaSign) {
+        float cr = cross3(xy[a * 2], xy[a * 2 + 1], xy[b * 2], xy[b * 2 + 1], xy[c * 2], xy[c * 2 + 1]);
+        if (cr * areaSign <= 1e-6f) {
+            return false; // рефлексная вершина или коллинейная
+        }
+        for (int i = 0; i < count; i++) {
+            int p = idx[i];
+            if (p == a || p == b || p == c) {
+                continue;
+            }
+            if (pointInTriangle(xy, a, b, c, p)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean pointInTriangle(float[] xy, int a, int b, int c, int p) {
+        float d1 = cross3(xy[a * 2], xy[a * 2 + 1], xy[b * 2], xy[b * 2 + 1], xy[p * 2], xy[p * 2 + 1]);
+        float d2 = cross3(xy[b * 2], xy[b * 2 + 1], xy[c * 2], xy[c * 2 + 1], xy[p * 2], xy[p * 2 + 1]);
+        float d3 = cross3(xy[c * 2], xy[c * 2 + 1], xy[a * 2], xy[a * 2 + 1], xy[p * 2], xy[p * 2 + 1]);
+        boolean hasNeg = d1 < -1e-6f || d2 < -1e-6f || d3 < -1e-6f;
+        boolean hasPos = d1 > 1e-6f || d2 > 1e-6f || d3 > 1e-6f;
+        return !(hasNeg && hasPos);
+    }
+
+    /** Рисует один выпуклый треугольник отдельной командой PATH_FILL. */
+    private static void emitTriangle(GuiGraphics g, float ax, float ay, float bx, float by, float cx, float cy, int argb) {
+        TRI[0] = ax;
+        TRI[1] = ay;
+        TRI[2] = bx;
+        TRI[3] = by;
+        TRI[4] = cx;
+        TRI[5] = cy;
+        Cmd c = cmd(PATH_FILL, g);
+        storePts(c, TRI, 3, true);
+        c.argb = argb;
+    }
+
     /** Виньетка на весь экран. */
     public static void vignette(GuiGraphics g, int w, int h, int argb) {
         float inset = Math.min(w, h) * 0.28f;
         rampFrame(g, inset, inset, Math.max(1, w - inset * 2), Math.max(1, h - inset * 2),
                 Math.min(w, h) * 0.45f, Math.max(40, Math.min(w, h) * 0.22f), argb);
+    }
+
+    /**
+     * Мягкое радиальное пятно — дым, туман, свечение.
+     *
+     * @param cx, cy центр пятна; d — диаметр
+     * @param core  цвет в центре (с альфой)
+     * @param edge  цвет на краю (обычно тот же RGB с альфой 0)
+     */
+    public static void radial(GuiGraphics g, float cx, float cy, float d, int core, int edge) {
+        if (d <= 0 || (ColorUtil.alphaI(core) <= 0 && ColorUtil.alphaI(edge) <= 0)) {
+            return;
+        }
+        Cmd c = cmd(RADIAL, g);
+        c.x = cx;
+        c.y = cy;
+        c.w = d;
+        c.argb = core;
+        c.argb2 = edge;
     }
 
     /* ------------------------------------------------------------------ */
@@ -399,6 +642,10 @@ public final class GfxEngine {
         c.size = size;
         c.argb = argb;
         c.bold = bold;
+        // bbox для ручного scissor: без него текст «протекал» за границу
+        // области обрезки на ~12px запаса (строки карточек под футером меню)
+        c.w = textWidth(s, size, bold);
+        c.h = size;
     }
 
     /** Ширина строки при заданном размере (в gui-пикселях). */
@@ -424,79 +671,131 @@ public final class GfxEngine {
         if (COMMANDS.isEmpty()) {
             return;
         }
-        if (!ensureReady()) {
-            // команды всё равно надо освободить, чтобы не копить мусор
-            releaseCommands();
-            return;
+        // обмен буферов: в COMMANDS уже можно писать следующий кадр, пока
+        // этот проигрывается (нулевая копирование-аллокация на кадр)
+        List<Cmd> cmds = COMMANDS;
+        COMMANDS = REPLAY;
+        REPLAY = cmds;
+        if (COMMANDS == cmds) { // страховка от рекурсии
+            COMMANDS = new ArrayList<>(512);
         }
-        Minecraft mc = Minecraft.getInstance();
-        RenderTarget target = mc.getMainRenderTarget();
-        if (target == null || target.width <= 0 || target.height <= 0) {
-            releaseCommands();
-            return;
-        }
-        int guiScale = Math.max(1, mc.getWindow().getGuiScale());
-        currentReplayScale = guiScale;
-        // Minecraft может оставить привязанным буфер выгрузки пикселей (PBO) —
-        // с ним атлас шрифтов NanoVG заливается пустым и текст пропадает
-        GL15.glBindBuffer(GL31.GL_PIXEL_UNPACK_BUFFER, 0);
-        // NanoVG работает на текстурном юните 0 и не переключает активный юнит сам —
-        // а MC часто оставляет активным другой юнит (тогда текст сэмплирует «пустоту»)
-        GL13.glActiveTexture(GL13.GL_TEXTURE0);
-        GL33.glBindSampler(0, 0);
-        try (RenderPass pass = openPass(target)) {
-            // на случай, если ванилла оставила scissor включённым
-            GL11.glDisable(GL11.GL_SCISSOR_TEST);
-            GL11.glDisable(GL11.GL_DEPTH_TEST);
-
-            NanoVG.nvgBeginFrame(ctx, target.width, target.height, guiScale);
-            if (DEBUG) {
-                GL11.glGetError(); // сброс
-                // диагностика: примитив и текст без позы, крупно
-                NanoVG.nvgBeginPath(ctx);
-                NanoVG.nvgRoundedRect(ctx, 40, 330, 120, 60, 10);
-                NanoVG.nvgFillColor(ctx, color(0xFFFF3355, colorA));
-                NanoVG.nvgFill(ctx);
-                NanoVG.nvgFontSize(ctx, 48);
-                NanoVG.nvgFontFaceId(ctx, fontMedium);
-                NanoVG.nvgTextAlign(ctx, NanoVG.NVG_ALIGN_LEFT | NanoVG.NVG_ALIGN_BASELINE);
-                NanoVG.nvgFillColor(ctx, color(0xFFFFFFFF, colorA));
-                NanoVG.nvgText(ctx, 40, 320, "AURORA NVG TEST");
-                int err = GL11.glGetError();
-                LOGGER.info("Aurora: GL error после тестового текста = {}", Integer.toHexString(err));
+        try {
+            if (!ensureReady()) {
+                return;
             }
-            for (int i = 0; i < COMMANDS.size(); i++) {
-                try {
-                    replay(COMMANDS.get(i));
-                } catch (Throwable t) {
-                    // одна сломанная команда не должна ронять весь кадр
+            Minecraft mc = Minecraft.getInstance();
+            RenderTarget target = mc.getMainRenderTarget();
+            if (target == null || target.width <= 0 || target.height <= 0) {
+                return;
+            }
+            int guiScale = Math.max(1, mc.getWindow().getGuiScale());
+            if (!loggedOnce) {
+                loggedOnce = true;
+                int[] vp = new int[4];
+                GL11.glGetIntegerv(GL11.GL_VIEWPORT, vp);
+                LOGGER.info("кадр Aurora: таргет {}x{}, guiScale {}, вьюпорт {}x{}+{}x{}",
+                        target.width, target.height, guiScale, vp[2], vp[3], vp[0], vp[1]);
+                if (DEBUG || PTS_DEBUG) {
+                    int[] stencilBits = new int[1];
+                    GL30.glGetFramebufferAttachmentParameteriv(GL30.GL_DRAW_FRAMEBUFFER,
+                            GL30.GL_STENCIL, GL30.GL_FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE, stencilBits);
+                    int[] depthBits = new int[1];
+                    GL30.glGetFramebufferAttachmentParameteriv(GL30.GL_DRAW_FRAMEBUFFER,
+                            GL30.GL_DEPTH, GL30.GL_FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE, depthBits);
+                    java.nio.ByteBuffer mask = java.nio.ByteBuffer.allocateDirect(4);
+                    GL11.glGetBooleanv(GL11.GL_COLOR_WRITEMASK, mask);
+                    LOGGER.info("GL-состояние: stencilBits={}, depthBits={}, stencilTest={}, stencilWritemask={}, depthTest={}, colorMask={},{},{},{}",
+                            stencilBits[0], depthBits[0],
+                            GL11.glIsEnabled(GL11.GL_STENCIL_TEST),
+                            (GL11.glGetInteger(GL11.GL_STENCIL_WRITEMASK) & 0xFF),
+                            GL11.glIsEnabled(GL11.GL_DEPTH_TEST),
+                            mask.get(0), mask.get(1), mask.get(2), mask.get(3));
                 }
             }
-            NanoVG.nvgEndFrame(ctx);
-        } catch (Throwable t) {
-            LOGGER.error("Aurora: сбой отрисовки NanoVG", t);
+            // Minecraft может оставить привязанным буфер выгрузки пикселей (PBO) —
+            // с ним атлас шрифтов NanoVG заливается пустым и текст пропадает
+            GL15.glBindBuffer(GL31.GL_PIXEL_UNPACK_BUFFER, 0);
+            // NanoVG работает на текстурном юните 0 и не переключает активный юнит сам —
+            // а MC часто оставляет активным другой юнит (тогда текст сэмплирует «пустоту»)
+            GL13.glActiveTexture(GL13.GL_TEXTURE0);
+            GL33.glBindSampler(0, 0);
+            try (RenderPass pass = openPass(target)) {
+                // на случай, если ванилла оставила scissor включённым
+                GL11.glDisable(GL11.GL_SCISSOR_TEST);
+                GL11.glDisable(GL11.GL_DEPTH_TEST);
+                GL11.glDepthMask(false);
+                // ванильный рендер оставляет мусор в стенсил-буфере главного
+                // таргета — NanoVG использует стенсил для заливки контуров,
+                // и без очистки примитивы «выпадают» (не проходят стенсил-тест)
+                GL11.glStencilMask(0xFF);
+                GL11.glClearStencil(0);
+                GL11.glClear(GL11.GL_STENCIL_BUFFER_BIT);
+
+                // nvgBeginFrame принимает ЛОГИЧЕСКИЙ размер (в поинтах/gui-пикселях),
+                // а pixelRatio = сколько физических пикселей на поинт. Раньше сюда
+                // передавали физический размер таргета — при guiScale > 1 весь интерфейс
+                // сжимался в guiScale раз (масштабировался дважды).
+                float logicalW = target.width / (float) guiScale;
+                float logicalH = target.height / (float) guiScale;
+                NanoVG.nvgBeginFrame(ctx, logicalW, logicalH, guiScale);
+                // scissor-состояние NanoVG живёт между кадрами: без сброса
+                // команды без собственного отсечения наследуют прошлокадровый
+                // rect (проявляется как «чёрные зоны» и пропавшие элементы)
+                NanoVG.nvgResetScissor(ctx);
+                if (DEBUG) {
+                    GL11.glGetError(); // сброс
+                    // диагностика: примитив и текст без позы, крупно
+                    NanoVG.nvgBeginPath(ctx);
+                    NanoVG.nvgRoundedRect(ctx, 40, 330, 120, 60, 10);
+                    NanoVG.nvgFillColor(ctx, color(0xFFFF3355, colorA));
+                    NanoVG.nvgFill(ctx);
+                    NanoVG.nvgFontSize(ctx, 48);
+                    NanoVG.nvgFontFaceId(ctx, fontMedium);
+                    NanoVG.nvgTextAlign(ctx, NanoVG.NVG_ALIGN_LEFT | NanoVG.NVG_ALIGN_BASELINE);
+                    NanoVG.nvgFillColor(ctx, color(0xFFFFFFFF, colorA));
+                    NanoVG.nvgText(ctx, 40, 320, "AURORA NVG TEST");
+                    int err = GL11.glGetError();
+                    LOGGER.info("Aurora: GL error после тестового текста = {}", Integer.toHexString(err));
+                }
+                for (int i = 0; i < cmds.size(); i++) {
+                    try {
+                        replay(cmds.get(i));
+                    } catch (Throwable t) {
+                        // одна сломанная команда не должна ронять весь кадр
+                    }
+                }
+                NanoVG.nvgEndFrame(ctx);
+                GL11.glDepthMask(true);
+            } catch (Throwable t) {
+                LOGGER.error("Aurora: сбой отрисовки NanoVG", t);
+            }
         } finally {
-            releaseCommands();
+            // вернуть команды в пул — на следующий кадр без аллокаций
+            for (int i = 0; i < cmds.size(); i++) {
+                Cmd c = cmds.get(i);
+                c.text = null;
+                c.ptCount = 0;
+                if (CMD_POOL.size() < 2048) {
+                    CMD_POOL.add(c);
+                }
+            }
+            cmds.clear();
         }
     }
 
-    /** Возвращает все команды в пул и очищает буфер кадра. */
-    private static void releaseCommands() {
-        for (int i = 0; i < COMMANDS.size(); i++) {
-            Cmd c = COMMANDS.get(i);
-            c.text = null; // отпускаем ссылку на строку
-            FREE_CMDS.addLast(c);
-        }
-        COMMANDS.clear();
-        if (FREE_CMDS.size() > 4096) {
-            FREE_CMDS.clear(); // страховка от разрастания пула
-        }
-    }
-
-    /** Открывает render pass на главный фреймбуфер (без очистки содержимого). */
+    /**
+     * Открывает render pass на главный фреймбуфер (без очистки содержимого).
+     *
+     * <p>Depth-стенсил-аттачмент обязателен: NanoVG рисует ЗАЛИВКУ ПОЛИГОНОВ
+     * стенсил-техникой (рёбра пишут в стенсил, затем заливается bbox под
+     * стенсил-тестом). Без стенсила вогнутые полигоны (молния-иконка,
+     * силуэты Target ESP) отрисовывались «веером треугольников» — огрызками.
+     * Глубину НЕ чистим и не пишем (depth test off, depthMask false),
+     * поэтому глубинные состояния последующих проходов Minecraft не страдают.</p>
+     */
     private static RenderPass openPass(RenderTarget target) {
         var encoder = RenderSystem.getDevice().createCommandEncoder();
-        var depth = target.getDepthTextureView();
+        GpuTextureView depth = target.getDepthTextureView();
         if (depth != null) {
             return encoder.createRenderPass(() -> "Aurora NanoVG",
                     target.getColorTextureView(), OptionalInt.empty(),
@@ -506,29 +805,130 @@ public final class GfxEngine {
                 target.getColorTextureView(), OptionalInt.empty());
     }
 
-    /** Масштаб gui для кадров, проигрываемых сейчас (см. replay). */
-    private static float currentReplayScale = 1f;
+    /**
+     * Габарит команды (x0, y0, x1, y1) в локальных координатах —
+     * для ручного scissor. Запасы: SOFT/RAMP расширяются сигмой краски,
+     * текст — высотой строки, круги — диаметром.
+     */
+    private static void commandBBox(Cmd c, float[] out) {
+        switch (c.type) {
+            case CIRCLE -> {
+                out[0] = c.x - c.w / 2f;
+                out[1] = c.y - c.w / 2f;
+                out[2] = c.x + c.w / 2f;
+                out[3] = c.y + c.w / 2f;
+            }
+            case RADIAL -> {
+                out[0] = c.x - c.w / 2f;
+                out[1] = c.y - c.w / 2f;
+                out[2] = c.x + c.w / 2f;
+                out[3] = c.y + c.w / 2f;
+            }
+            case ELLIPSE -> {
+                out[0] = c.x - c.w;
+                out[1] = c.y - c.h;
+                out[2] = c.x + c.w;
+                out[3] = c.y + c.h;
+            }
+            case TEXT -> {
+                out[0] = c.x - 1f;
+                out[1] = c.y - c.h * 0.9f;
+                out[2] = c.x + c.w + 1f;
+                out[3] = c.y + c.h * 0.3f;
+            }
+            case SOFT, RAMP -> {
+                float pad = c.p1 * 2.5f + 2f;
+                out[0] = c.x - pad;
+                out[1] = c.y - pad + (c.type == SOFT ? c.p2 : 0);
+                out[2] = c.x + c.w + pad;
+                out[3] = c.y + c.h + pad + (c.type == SOFT ? c.p2 : 0);
+            }
+            default -> {
+                out[0] = c.x;
+                out[1] = c.y;
+                out[2] = c.x + c.w;
+                out[3] = c.y + c.h;
+            }
+        }
+    }
+
+    /**
+     * Ручное отсечение команды областью scissor (в глобальных координатах).
+     *
+     * <p>nvgIntersectScissor в связке с devicePixelRatio &gt; 1 отсекает
+     * валидные области (примитивы «пропадали» целыми рядами), поэтому
+     * отсечение считается вручную: прямоугольные примитивы без вращения
+     * позы клэмпятся точно; остальные проверяются по габариту — полностью
+     * вне области отбрасываются, частично пересекающиеся рисуются целиком.</p>
+     *
+     * @return false — команда полностью вне области
+     */
+    private static boolean applyManualScissor(Cmd c, Matrix3x2fc p) {
+        float sx1 = c.sx + c.sw;
+        float sy1 = c.sy + c.sh;
+        boolean noRot = Math.abs(p.m01()) < 1e-4f && Math.abs(p.m10()) < 1e-4f
+                && Math.abs(p.m00()) > 1e-4f && Math.abs(p.m11()) > 1e-4f;
+        boolean rectLike = c.type == FILL || c.type == GRADIENT || c.type == GRADIENT_H
+                || c.type == OUTLINE;
+        if (rectLike && noRot) {
+            float gx0 = p.m00() * c.x + p.m20();
+            float gy0 = p.m11() * c.y + p.m21();
+            float gx1 = p.m00() * (c.x + c.w) + p.m20();
+            float gy1 = p.m11() * (c.y + c.h) + p.m21();
+            float x0 = Math.max(Math.min(gx0, gx1), c.sx);
+            float y0 = Math.max(Math.min(gy0, gy1), c.sy);
+            float x1 = Math.min(Math.max(gx0, gx1), sx1);
+            float y1 = Math.min(Math.max(gy0, gy1), sy1);
+            if (x1 <= x0 || y1 <= y0) {
+                return false;
+            }
+            c.x = (x0 - p.m20()) / p.m00();
+            c.y = (y0 - p.m21()) / p.m11();
+            c.w = (x1 - p.m20()) / p.m00() - c.x;
+            c.h = (y1 - p.m21()) / p.m11() - c.y;
+            return true;
+        }
+        // габарит с учётом позы: полностью вне области — отбрасываем
+        commandBBox(c, BB);
+        float x0 = BB[0], y0 = BB[1], x1 = BB[2], y1 = BB[3];
+        float ax0 = p.m00() * x0 + p.m10() * y0 + p.m20();
+        float ay0 = p.m01() * x0 + p.m11() * y0 + p.m21();
+        float ax1 = p.m00() * x1 + p.m10() * y1 + p.m20();
+        float ay1 = p.m01() * x1 + p.m11() * y1 + p.m21();
+        if (noRot) {
+            float bx0 = p.m00() * x0 + p.m20();
+            float by0 = p.m11() * y1 + p.m21();
+            float bx1 = p.m00() * x1 + p.m20();
+            float by1 = p.m11() * y0 + p.m21();
+            ax0 = Math.min(ax0, bx0);
+            ax1 = Math.max(ax1, bx1);
+            ay0 = Math.min(ay0, by0);
+            ay1 = Math.max(ay1, by1);
+        } else {
+            float lox = Math.min(ax0, ax1), hix = Math.max(ax0, ax1);
+            float loy = Math.min(ay0, ay1), hiy = Math.max(ay0, ay1);
+            ax0 = lox;
+            ax1 = hix;
+            ay0 = loy;
+            ay1 = hiy;
+        }
+        return ax1 > c.sx && ax0 < sx1 && ay1 > c.sy && ay0 < sy1;
+    }
 
     private static void replay(Cmd c) {
         Matrix3x2fc p = c.pose;
         if (c.sw == 0) {
             return; // пустая scissor-область — команда полностью отсечена
         }
-        float gs = currentReplayScale;
-        if (p.m00() * gs * p.m11() * gs - p.m01() * gs * p.m10() * gs == 0f) {
+        if (p.m00() * p.m11() - p.m01() * p.m10() == 0f) {
             return; // вырожденная поза
+        }
+        if (c.sw > 0 && !applyManualScissor(c, p)) {
+            return; // вне области отсечения
         }
         NanoVG.nvgSave(ctx);
         try {
-            // Поза GuiGraphics содержит только координаты gui (без guiScale),
-            // а NanoVG рисует прямо в физические пиксели фреймбуфера —
-            // поэтому домножаем матрицу на guiScale, иначе при масштабе
-            // интерфейса 2+ весь интерфейс Aurora сжимается в угол экрана
-            NanoVG.nvgTransform(ctx, p.m00() * gs, p.m01() * gs, p.m10() * gs, p.m11() * gs,
-                    p.m20() * gs, p.m21() * gs);
-            if (c.sw > 0) {
-                NanoVG.nvgIntersectScissor(ctx, c.sx, c.sy, c.sw, c.sh);
-            }
+            NanoVG.nvgTransform(ctx, p.m00(), p.m01(), p.m10(), p.m11(), p.m20(), p.m21());
             switch (c.type) {
                 case FILL -> fillRounded(c.x, c.y, c.w, c.h, c.r, c.argb);
                 case CIRCLE -> {
@@ -537,11 +937,27 @@ public final class GfxEngine {
                     NanoVG.nvgFillColor(ctx, color(c.argb, colorA));
                     NanoVG.nvgFill(ctx);
                 }
+                case RADIAL -> {
+                    NanoVG.nvgBeginPath(ctx);
+                    NanoVG.nvgCircle(ctx, c.x, c.y, c.w / 2f);
+                    NanoVG.nvgFillPaint(ctx, NanoVG.nvgRadialGradient(ctx,
+                            c.x, c.y, c.w * 0.18f, c.w / 2f,
+                            color(c.argb, colorA), transparent(c.argb2, colorB), paint));
+                    NanoVG.nvgFill(ctx);
+                }
                 case GRADIENT -> {
                     NanoVG.nvgBeginPath(ctx);
                     NanoVG.nvgRoundedRect(ctx, c.x, c.y, c.w, c.h, radius(c.r, c.w, c.h));
                     NanoVG.nvgFillPaint(ctx, NanoVG.nvgLinearGradient(ctx,
                             c.x, c.y, c.x, c.y + c.h, color(c.argb, colorA), color(c.argb2, colorB), paint));
+                    NanoVG.nvgFill(ctx);
+                }
+                case GRADIENT_H -> {
+                    NanoVG.nvgBeginPath(ctx);
+                    NanoVG.nvgRect(ctx, c.x, c.y, c.w, c.h);
+                    NanoVG.nvgFillPaint(ctx, NanoVG.nvgLinearGradient(ctx,
+                            c.x, c.y + c.h / 2f, c.x + c.w, c.y + c.h / 2f,
+                            color(c.argb, colorA), color(c.argb2, colorB), paint));
                     NanoVG.nvgFill(ctx);
                 }
                 case OUTLINE -> {
@@ -572,6 +988,38 @@ public final class GfxEngine {
                             c.x, c.y, c.w, c.h, radius(c.r, c.w, c.h), fade,
                             transparent(c.argb, colorA), color(c.argb, colorB), paint));
                     NanoVG.nvgFill(ctx);
+                }
+                case ELLIPSE -> {
+                    NanoVG.nvgBeginPath(ctx);
+                    NanoVG.nvgEllipse(ctx, c.x, c.y, c.w, c.h);
+                    NanoVG.nvgStrokeColor(ctx, color(c.argb, colorA));
+                    NanoVG.nvgStrokeWidth(ctx, c.p1);
+                    NanoVG.nvgStroke(ctx);
+                }
+                case PATH_STROKE, PATH_FILL -> {
+                    if (PTS_DEBUG) {
+                        LOGGER.info("replay path n={} type={} closed={} pts0=({},{}) ptsLast=({},{}) bbox=({},{},{},{})",
+                                c.ptCount, c.type, c.closed, c.pts[0], c.pts[1],
+                                c.pts[(c.ptCount - 1) * 2], c.pts[(c.ptCount - 1) * 2 + 1],
+                                c.x, c.y, c.w, c.h);
+                    }
+                    NanoVG.nvgBeginPath(ctx);
+                    float[] pts = c.pts;
+                    NanoVG.nvgMoveTo(ctx, pts[0], pts[1]);
+                    for (int i = 1; i < c.ptCount; i++) {
+                        NanoVG.nvgLineTo(ctx, pts[i * 2], pts[i * 2 + 1]);
+                    }
+                    if (c.closed) {
+                        NanoVG.nvgClosePath(ctx);
+                    }
+                    if (c.type == PATH_FILL) {
+                        NanoVG.nvgFillColor(ctx, color(c.argb, colorA));
+                        NanoVG.nvgFill(ctx);
+                    } else {
+                        NanoVG.nvgStrokeColor(ctx, color(c.argb, colorA));
+                        NanoVG.nvgStrokeWidth(ctx, c.p1);
+                        NanoVG.nvgStroke(ctx);
+                    }
                 }
                 case TEXT -> {
                     NanoVG.nvgFontSize(ctx, c.size);
@@ -627,4 +1075,5 @@ public final class GfxEngine {
         out.a(0f);
         return out;
     }
+
 }

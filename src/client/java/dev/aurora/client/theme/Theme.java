@@ -4,6 +4,7 @@ import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonObject;
 import dev.aurora.client.util.ColorUtil;
+import dev.aurora.client.util.FrameClock;
 import net.fabricmc.loader.api.FabricLoader;
 
 import java.nio.file.Files;
@@ -15,7 +16,7 @@ import java.nio.file.Path;
  */
 public class Theme {
     public static final String CLIENT_NAME = "Aurora";
-    public static final String CLIENT_VERSION = "1.0.3";
+    public static final String CLIENT_VERSION = "1.0.6";
     public static final String MC_VERSION = "1.21.11";
 
     /** Основной акцентный цвет (по умолчанию — фиолетовый, как на референсе). */
@@ -24,8 +25,8 @@ public class Theme {
     public int accent2 = ColorUtil.rgb(99, 102, 241);
     /** Радужный режим акцента. */
     public boolean rainbow = false;
-    /** Прозрачность панелей (0..1) — стекло тем прозрачнее, чем меньше значение. */
-    public float backgroundAlpha = 0.45f;
+    /** Прозрачность панелей (0..1). */
+    public float backgroundAlpha = 0.55f;
     /** Сила блюра за меню (0..10). */
     public int blurStrength = 10;
     /** Включить блюр за меню. */
@@ -36,6 +37,8 @@ public class Theme {
     public boolean customFont = true;
     /** Клавиша открытия меню (GLFW-код, по умолчанию — левый Ctrl). */
     public int menuKey = 341;
+    /** Сетка и привязка в HUD-редакторе. */
+    public boolean hudGrid = true;
 
     /** Пресеты акцента: name -> [accent, accent2]. */
     public static final String[][] PRESETS = {
@@ -47,6 +50,10 @@ public class Theme {
             {"Золото", "F59E0B", "FDE047"},
             {"Роза", "EC4899", "F472B6"},
             {"Аметист", "A78BFA", "C084FC"},
+            {"Лайм", "A3E635", "22C55E"},
+            {"Магма", "F43F5E", "FB923C"},
+            {"Ночь", "38BDF8", "818CF8"},
+            {"Мята", "2DD4BF", "34D399"},
     };
 
     public int accent(float t) {
@@ -56,37 +63,26 @@ public class Theme {
         return ColorUtil.lerp(accent, accent2, t);
     }
 
-    /** Акцентный цвет с учётом времени (для анимаций). */
+    /** Кэш акцента на текущий кадр: accentNow() вызывается десятки раз за кадр. */
+    private long accentCacheAt = Long.MIN_VALUE;
+    private int accentCache = 0;
+
+    /** Акцентный цвет с учётом времени (кэшируется на кадр). */
     public int accentNow() {
-        return accent((float) (Math.sin(System.currentTimeMillis() / 2000.0) * 0.5 + 0.5));
+        long now = FrameClock.now();
+        if (now != accentCacheAt) {
+            accentCache = accent((float) (Math.sin(now / 2000.0) * 0.5 + 0.5));
+            accentCacheAt = now;
+        }
+        return accentCache;
     }
 
     public int panelColor() {
-        return ColorUtil.alpha(ColorUtil.rgb(16, 17, 26), (int) (backgroundAlpha * 255));
-    }
-
-    /** Более прозрачная база для карточек поверх главного окна. */
-    public int cardGlassColor() {
-        return ColorUtil.alpha(ColorUtil.rgb(14, 15, 24), (int) (backgroundAlpha * 175));
-    }
-
-    /** База стеклянных капсул HUD. */
-    public int hudGlassColor() {
-        return ColorUtil.alpha(ColorUtil.rgb(11, 12, 20), (int) (backgroundAlpha * 200));
+        return ColorUtil.alpha(ColorUtil.rgb(17, 18, 27), (int) (backgroundAlpha * 255));
     }
 
     public int borderColor() {
-        return ColorUtil.rgba(255, 255, 255, 38);
-    }
-
-    /** Обводка стеклянных панелей. */
-    public int glassBorder() {
-        return ColorUtil.rgba(255, 255, 255, 42);
-    }
-
-    /** Верхний светлый кант стекла (блик). */
-    public int glassHighlight() {
-        return ColorUtil.rgba(255, 255, 255, 64);
+        return ColorUtil.rgba(255, 255, 255, 26);
     }
 
     public int textPrimary() {
@@ -106,12 +102,13 @@ public class Theme {
         accent = ColorUtil.rgb(139, 92, 246);
         accent2 = ColorUtil.rgb(99, 102, 241);
         rainbow = false;
-        backgroundAlpha = 0.45f;
+        backgroundAlpha = 0.55f;
         blurStrength = 10;
         blur = true;
         animations = true;
         customFont = true;
         menuKey = 341;
+        hudGrid = true;
     }
 
     public JsonObject save() {
@@ -125,6 +122,7 @@ public class Theme {
         o.addProperty("animations", animations);
         o.addProperty("customFont", customFont);
         o.addProperty("menuKey", menuKey);
+        o.addProperty("hudGrid", hudGrid);
         return o;
     }
 
@@ -152,6 +150,7 @@ public class Theme {
             if (o.has("menuKey")) {
                 menuKey = o.get("menuKey").getAsInt();
             }
+            hudGrid = !o.has("hudGrid") || o.get("hudGrid").getAsBoolean();
         } catch (Exception ignored) {
         }
     }

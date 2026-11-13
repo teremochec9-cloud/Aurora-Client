@@ -15,23 +15,39 @@ import net.minecraft.client.gui.GuiGraphics;
  *
  * <p>Кнопки мыши шире сетки клавиш: их размер подбирается под текст
  * «ЛКМ/ПКМ + CPS», поэтому счётчик никогда не налезает на подпись.
- * Клавиатурный блок центрируется над ними.</p>
+ * Клавиатурный блок центрируется над ними. CPS на кнопках можно
+ * отключить настройкой.</p>
  */
 public class KeystrokesHud extends HudModule {
     private static final int KEY = 20;
     private static final int GAP = 2;
     private static final int KEYS_W = KEY * 3 + GAP * 2;
 
+    /** Показывать счётчик CPS на кнопках мыши. */
+    public final dev.aurora.client.module.settings.BooleanSetting showCps =
+            new dev.aurora.client.module.settings.BooleanSetting("CPS на кнопках", true,
+                    "Показывать счётчик кликов на кнопках мыши");
+
     public KeystrokesHud() {
         super("Клавиши", "Подсветка нажатий WASD и кнопок мыши", 0.006f, 0.55f);
         anchorY = 1; // центрировать по вертикали относительно точки
+        addSettings(showCps);
+    }
+
+    /** Подпись кнопки мыши: с CPS или без. */
+    private String mouseLabel(String base, int cps) {
+        return showCps.get() ? base + " " + cps : base;
     }
 
     /** Ширина кнопки мыши: по самому длинному ожидаемому тексту (до 3 цифр CPS). */
     private int mouseW(Font font, Theme theme) {
-        int need = Math.max(
-                RenderUtil.width(font, "ЛКМ 000", theme),
-                RenderUtil.width(font, "ПКМ 000", theme));
+        int need = showCps.get()
+                ? Math.max(
+                        RenderUtil.width(font, "ЛКМ 000", theme),
+                        RenderUtil.width(font, "ПКМ 000", theme))
+                : Math.max(
+                        RenderUtil.width(font, "ЛКМ", theme),
+                        RenderUtil.width(font, "ПКМ", theme));
         return Math.max(44, need + 12);
     }
 
@@ -68,8 +84,8 @@ public class KeystrokesHud extends HudModule {
         key(g, font, keyX + KEY + GAP, KEY + GAP, "S", s, theme);
         key(g, font, keyX + (KEY + GAP) * 2, KEY + GAP, "D", d, theme);
         // ЛКМ / ПКМ: две независимые кнопки, текст не пересекается
-        mouseKey(g, font, 0, mouseRowY, mw, "ЛКМ " + ClickTracker.leftCps(), lmb, theme);
-        mouseKey(g, font, mw + GAP, mouseRowY, mw, "ПКМ " + ClickTracker.rightCps(), rmb, theme);
+        mouseKey(g, font, 0, mouseRowY, mw, mouseLabel("ЛКМ", ClickTracker.leftCps()), lmb, theme);
+        mouseKey(g, font, mw + GAP, mouseRowY, mw, mouseLabel("ПКМ", ClickTracker.rightCps()), rmb, theme);
     }
 
     private void key(GuiGraphics g, Font font, int x, int y, String label, boolean pressed, Theme theme) {

@@ -1,9 +1,9 @@
 package dev.aurora.client.hud;
 
+import dev.aurora.client.AuroraClient;
 import dev.aurora.client.theme.Theme;
+import dev.aurora.client.module.settings.BooleanSetting;
 import dev.aurora.client.util.ClickTracker;
-import dev.aurora.client.util.ColorUtil;
-import dev.aurora.client.util.GfxEngine;
 import dev.aurora.client.util.RenderUtil;
 import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.Minecraft;
@@ -12,23 +12,26 @@ import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.multiplayer.PlayerInfo;
 
 /**
- * Водяной знак клиента: название с градиентом, FPS и пинг.
+ * Водяной знак клиента: название с градиентом, опционально — FPS и пинг.
+ *
+ * <p>Ширина считается из той же закэшированной строки, что и рисуется:
+ * капсула всегда совпадает с текстом без переполнения и без «дыхания».</p>
  */
 public class WatermarkHud extends HudModule {
+    public final BooleanSetting showFps = new BooleanSetting("FPS", true, "Показывать счётчик FPS");
+    public final BooleanSetting showPing = new BooleanSetting("Пинг", true, "Показывать задержку");
 
     public WatermarkHud() {
         super("Водяной знак", "Логотип клиента с FPS и пингом", 0.005f, 0.005f);
+        addSettings(showFps, showPing);
     }
 
     @Override
     public int width() {
         Minecraft mc = Minecraft.getInstance();
-        // ширина капсулы считается из ТОЙ ЖЕ кэшированной строки, что и рендер:
-        // раньше здесь брали живые значения, и при обновлении fps/пинга капсула
-        // на кадр не вмещала текст (текст вылезал за плашку)
-        String rest = cached("wm_rest", 500, () -> mc.getFps() + " fps  " + pingText(mc));
+        // +15: 6 слева + 6 после имени + 3 запаса — текст не упирается в край капсулы
         return RenderUtil.width(mc.font, Theme.CLIENT_NAME, theme())
-                + RenderUtil.width(mc.font, rest, theme()) + 17;
+                + RenderUtil.width(mc.font, rest(mc), theme()) + 15;
     }
 
     @Override
@@ -40,9 +43,19 @@ public class WatermarkHud extends HudModule {
         return dev.aurora.client.AuroraClient.theme();
     }
 
-    private String pingText(Minecraft mc) {
-        int ping = ping(mc);
-        return ping < 0 ? "—" : ping + " ms";
+    /** Хвост «  123 fps  45 ms» — та же закэшированная строка, что и в рендере. */
+    private String rest(Minecraft mc) {
+        return cached("wm_rest", 500, () -> {
+            StringBuilder sb = new StringBuilder();
+            if (showFps.get()) {
+                sb.append("  ").append(mc.getFps()).append(" fps");
+            }
+            if (showPing.get()) {
+                int ping = ping(mc);
+                sb.append("  ").append(ping < 0 ? "—" : ping + " ms");
+            }
+            return sb.toString();
+        });
     }
 
     static int ping(Minecraft mc) {
@@ -62,11 +75,8 @@ public class WatermarkHud extends HudModule {
     protected void renderContent(GuiGraphics g, Font font, DeltaTracker dt, Theme theme, Minecraft mc) {
         int accentA = theme.accentNow();
         int accentB = theme.accent(1.0f);
-        // акцентная полоска-«искра» слева — фирменный штрих логотипа
-        GfxEngine.roundedGradient(g, 1.5f, 3, 2.5f, 9, 1.25f, accentA, accentB);
-        int x = 8;
+        int x = 6;
         x += RenderUtil.drawGradientText(g, font, Theme.CLIENT_NAME, x, 3, accentA, accentB, theme) + 6;
-        String rest = cached("wm_rest", 500, () -> mc.getFps() + " fps  " + pingText(mc));
-        RenderUtil.drawText(g, font, rest, x, 3, theme.textSecondary(), theme);
+        RenderUtil.drawText(g, font, rest(mc), x, 3, theme.textSecondary(), theme);
     }
 }

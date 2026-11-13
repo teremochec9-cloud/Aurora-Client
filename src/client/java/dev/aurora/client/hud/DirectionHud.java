@@ -21,16 +21,8 @@ public class DirectionHud extends HudModule {
     @Override
     public int width() {
         Minecraft mc = Minecraft.getInstance();
-        // из кэша той же строки, что и рендер
-        String text = cached("dir", 100, () -> {
-            if (mc.player != null) {
-                float yaw = mc.player.getYRot();
-                int idx = ((int) Math.round(yaw / 45.0f) & 7);
-                return DIRS[idx] + String.format(" (%+d°)", Math.round(Math.floorMod((int) yaw + 180, 360) - 180));
-            }
-            return "—";
-        });
-        return RenderUtil.width(mc.font, text, theme()) + 10;
+        // «Восток» — самое длинное направление: капсула не прыгает при повороте
+        return RenderUtil.width(mc.font, "Восток (+000°)", theme()) + 12;
     }
 
     @Override

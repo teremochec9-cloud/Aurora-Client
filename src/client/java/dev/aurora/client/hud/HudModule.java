@@ -6,7 +6,6 @@ import dev.aurora.client.module.Module;
 import dev.aurora.client.module.settings.BooleanSetting;
 import dev.aurora.client.module.settings.NumberSetting;
 import dev.aurora.client.theme.Theme;
-import dev.aurora.client.util.Animation;
 import dev.aurora.client.util.ColorUtil;
 import dev.aurora.client.util.GfxEngine;
 import dev.aurora.client.util.RenderUtil;
@@ -27,13 +26,15 @@ public abstract class HudModule extends Module {
     public int anchorY = 0;
 
     public final NumberSetting scale = new NumberSetting("Масштаб", 1.0f, 0.6f, 2.0f, 0.05f, 2, "Размер элемента");
+    public final NumberSetting opacity = new NumberSetting("Плотность фона", 1.0f, 0.15f, 1.0f, 0.05f, 2,
+            "Насколько плотной делать подложку");
     public final BooleanSetting background = new BooleanSetting("Фон", true, "Стеклянная подложка");
 
     protected HudModule(String name, String description, float defX, float defY) {
         super(name, description, Category.HUD);
         this.x = defX;
         this.y = defY;
-        addSettings(scale, background);
+        addSettings(scale, opacity, background);
     }
 
     /** Ширина элемента без масштаба (для рамки в редакторе). */
@@ -116,7 +117,7 @@ public abstract class HudModule extends Module {
 
     /** Кэш ширины призрачной подписи «(выкл)»: ключ — текст (статичен для
      *  элемента) + шрифт (customFont + экземпляр Font), без scale — он
-     *  применяется снаружи. Ничего динамического в подписи нет. */
+     *  применяется снаружи. Отступы по 8 px с обеих сторон. */
     private int ghostLabelW = -1;
     private boolean ghostLabelWFontFlag;
     private Font ghostLabelWFontRef;
@@ -125,7 +126,7 @@ public abstract class HudModule extends Module {
         Minecraft mc = Minecraft.getInstance();
         boolean fontFlag = AuroraClient.theme().customFont;
         if (ghostLabelW == -1 || ghostLabelWFontFlag != fontFlag || ghostLabelWFontRef != mc.font) {
-            ghostLabelW = RenderUtil.width(mc.font, name + " (выкл)", AuroraClient.theme()) + 12;
+            ghostLabelW = RenderUtil.width(mc.font, name + " (выкл)", AuroraClient.theme()) + 16;
             ghostLabelWFontFlag = fontFlag;
             ghostLabelWFontRef = mc.font;
         }
@@ -232,33 +233,13 @@ public abstract class HudModule extends Module {
         return true;
     }
 
-    /** Полная отрисовка элемента (вызывается рендерером HUD). */
+    /** Полная отрисовка элемента (вызывается рендерером HUD и редактором). */
     public void render(GuiGraphics g, DeltaTracker dt, Theme theme, Minecraft mc) {
-        // плавное появление/скрытие: цель — состояние модуля
-        vis.to(isEnabled() ? 1f : 0f);
-        float v = vis.update();
-        if (v < 0.02f) {
+        if (!isEnabled()) {
             return;
         }
-        float s = scale.get();
-        int px = clampedPixelX(g.guiWidth());
-        int py = clampedPixelY(g.guiHeight());
-        float ease = Animation.smooth(v);
-        float cxp = px + width() * s / 2f;
-        float cyp = py + height() * s / 2f;
-        g.pose().pushMatrix();
-        // выезд сверху + лёгкий зум вокруг центра элемента
-        float zoom = 0.9f + 0.1f * ease;
-        g.pose().translate(cxp, cyp);
-        g.pose().scale(zoom, zoom);
-        g.pose().translate(-cxp, -cyp);
-        g.pose().translate(0, -(1f - ease) * 6f);
-        renderInner(g, dt, theme, mc, ease);
-        g.pose().popMatrix();
+        renderInner(g, dt, theme, mc, 1f);
     }
-
-    /** Анимация видимости (1 — показан, 0 — скрыт). */
-    private final Animation vis = new Animation(0, 13);
 
     /**
      * Отрисовка в редакторе HUD: включённые элементы рисуются как в игре,
@@ -273,25 +254,27 @@ public abstract class HudModule extends Module {
         float s = scale.get();
         int px = clampedPixelX(g.guiWidth());
         int py = clampedPixelY(g.guiHeight());
+        String label = name + " (выкл)";
+        // капсула рисуется ВНУТРИ pose.scale(s), поэтому ширина — без масштаба:
+        // после масштабирования она совпадёт с effBBoxWidth, который использует
+        // кламп (иначе у правого края текст вылезал за экран)
+        int capW = Math.max(width() + 6, ghostLabelWidth());
+        int capH = height() + 2;
+        int maxLabelW = Math.max(10, capW - 16);
+        String shown = RenderUtil.ellipsize(mc.font, label, maxLabelW, theme);
+        int shownW = RenderUtil.width(mc.font, shown, theme);
         g.pose().pushMatrix();
         g.pose().translate(px, py);
         g.pose().scale(s, s);
         // стеклянный «призрак» выключенного элемента
-        GfxEngine.rounded(g, -3, -1, width() + 6, height() + 2, 7, ColorUtil.rgba(255, 255, 255, 16));
-        GfxEngine.roundedGradient(g, -3, -1, width() + 6, height() + 2, 7,
+        GfxEngine.rounded(g, -3, -1, capW, capH, 7, ColorUtil.rgba(255, 255, 255, 16));
+        GfxEngine.roundedGradient(g, -3, -1, capW, capH, 7,
                 ColorUtil.rgba(255, 255, 255, 14), ColorUtil.rgba(255, 255, 255, 2));
-        GfxEngine.outline(g, -3, -1, width() + 6, height() + 2, 7, ColorUtil.rgba(255, 255, 255, 52), 1f);
-        // подпись у правого края элемента — иначе у «прижатых» к правому краю
-        // элементов текст призрака уходил за границу экрана
-        String label = name + " (выкл)";
-        int labelW = RenderUtil.width(mc.font, label, theme);
-        float labelX = anchorX == 2 ? width() - labelW - 4 : 4;
-        // двухцветная подпись: имя ярче, статус «(выкл)» приглушён
-        int nameW = RenderUtil.width(mc.font, name, theme);
-        RenderUtil.drawText(g, mc.font, name, labelX, 4,
-                ColorUtil.rgba(255, 255, 255, 175), theme);
-        RenderUtil.drawText(g, mc.font, " (выкл)", labelX + nameW, 4,
-                ColorUtil.rgba(255, 255, 255, 85), theme);
+        GfxEngine.outline(g, -3, -1, capW, capH, 7, ColorUtil.rgba(255, 255, 255, 52), 1f);
+        // подпись: у правого края для элементов с привязкой справа, иначе — слева
+        float labelX = anchorX == 2 ? capW - shownW - 8 : 8;
+        RenderUtil.drawText(g, mc.font, shown, labelX, 4,
+                ColorUtil.rgba(255, 255, 255, 130), theme);
         g.pose().popMatrix();
     }
 
@@ -304,8 +287,8 @@ public abstract class HudModule extends Module {
         g.pose().translate(px, py);
         g.pose().scale(s, s);
         if (background.get()) {
-            // стеклянная капсула: тень, подложка, обводка
-            RenderUtil.glassCapsule(g, -3, -1, width() + 6, height() + 2, 7, theme);
+            // стеклянная капсула: тень, подложка, обводка (с учётом плотности)
+            RenderUtil.glassCapsule(g, -3, -1, width() + 6, height() + 2, 7, theme, opacity.get());
             // текст должен рисоваться в отдельном слое поверх капсулы
             g.nextStratum();
         }
@@ -338,39 +321,14 @@ public abstract class HudModule extends Module {
         return CACHE.get(key);
     }
 
-    /** Рамка выделения в редакторе HUD: свечение и угловые маркеры при драге;
-     *  наведение подсвечивается плавно (по экспоненте, а не скачком). */
-    private final Animation editorHover = new Animation(0, 11);
-
+    /** Рамка выделения в редакторе HUD. */
     public void renderEditorFrame(GuiGraphics g, Theme theme, boolean hovered, boolean dragging) {
-        float hoverT = editorHover.apply(hovered && !dragging ? 1f : 0f);
         float s = scale.get();
         int px = clampedPixelX(g.guiWidth());
         int py = clampedPixelY(g.guiHeight());
         int w = (int) Math.floor(width() * s);
         int h = (int) Math.floor(height() * s);
-        if (dragging) {
-            // мягкое акцентное свечение + углы — читается как «держишь элемент»
-            GfxEngine.glow(g, px - 8, py - 8, w + 16, h + 16, 10, 9f,
-                    ColorUtil.alpha(theme.accentNow(), 85));
-            RenderUtil.roundedOutline(g, px - 3, py - 3, w + 6, h + 6, 6, theme.accentNow());
-            int corner = theme.accentNow();
-            RenderUtil.rounded(g, px - 5, py - 5, 4, 4, 1.5f, corner);
-            RenderUtil.rounded(g, px + w + 1, py - 5, 4, 4, 1.5f, corner);
-            RenderUtil.rounded(g, px - 5, py + h + 1, 4, 4, 1.5f, corner);
-            RenderUtil.rounded(g, px + w + 1, py + h + 1, 4, 4, 1.5f, corner);
-        } else {
-            // плавная подсветка: от едва заметной рамки к акцентной при наведении
-            float k = Animation.smooth(hoverT);
-            int a = (int) (80 + 140 * k);
-            int col = k > 0.55f
-                    ? ColorUtil.alpha(theme.accentNow(), a)
-                    : ColorUtil.rgba(255, 255, 255, a);
-            if (k > 0.05f) {
-                GfxEngine.glow(g, px - 6, py - 6, w + 12, h + 12, 8, 6f,
-                        ColorUtil.alpha(theme.accentNow(), (int) (55 * k)));
-            }
-            RenderUtil.roundedOutline(g, px - 3, py - 3, w + 6, h + 6, 6, col);
-        }
+        int color = dragging ? theme.accentNow() : hovered ? ColorUtil.rgba(255, 255, 255, 170) : ColorUtil.rgba(255, 255, 255, 90);
+        RenderUtil.roundedOutline(g, px - 3, py - 3, w + 6, h + 6, 6, color);
     }
 }

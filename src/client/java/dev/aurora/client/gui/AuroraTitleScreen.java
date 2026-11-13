@@ -6,7 +6,9 @@ import dev.aurora.client.module.ModuleManager;
 import dev.aurora.client.theme.Theme;
 import dev.aurora.client.util.Animation;
 import dev.aurora.client.util.ColorUtil;
+import dev.aurora.client.util.FrameClock;
 import dev.aurora.client.util.GfxEngine;
+import dev.aurora.client.util.IconPainter;
 import dev.aurora.client.util.RenderUtil;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
@@ -24,45 +26,85 @@ import org.lwjgl.glfw.GLFW;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
- * Главное меню Aurora: размытая панорама с виньеткой и «северным сиянием»,
- * по центру стеклянная карточка с крупным градиентным логотипом и
- * скруглёнными кнопками с плавным наведением.
+ * Главное меню Aurora — «Дым».
  *
- * <p>Вёрстка адаптивная и рассчитана на реальные gui-высоты: на типичном
- * окне 854x480 (gui 427x240) карточка остаётся с логотипом, подписью и
- * полноразмерными кнопками — «компактный» режим включается только при
- * действительно малой высоте.</p>
+ * <p>Глубокий градиент с живым многослойным дымом: три слоя мягких радиальных
+ * пятен медленно всплывают, покачиваются и реагируют параллаксом на курсор.
+ * Позиция каждой точки дыма — чистая функция времени кадра ({@link FrameClock}),
+ * поэтому анимация идеально плавная при любой частоте кадров и без аллокаций.</p>
+ *
+ * <p>Центр композиции — бренд-иконка Aurora (процедурная «A» на фиолетовом
+ * сквиркле, {@link IconPainter}): плавно всплывает при появлении, мягко
+ * «дышит» свечением и чуть покачивается. Под ней крупное приветствие
+ * «С возвращением, игрок» и кнопки: первая — акцентная (primary), остальные —
+ * стекло. Экран затемнён по бокам (мягкие боковые градиенты), центр — светлее.</p>
+ *
+ * <p>Оптимизация: ни панорамы, ни полного экранного gaussian-блюра; параметры
+ * дыма в плоских массивах, строки кэшируются, время читается один раз.</p>
  */
 public class AuroraTitleScreen extends Screen {
+    private static final Logger LOG = LoggerFactory.getLogger("Aurora/Title");
     private final Theme theme;
-    private final List<Particle> particles = new ArrayList<>();
-    private final Animation appear = new Animation(0, 6);
-    private final List<Hit> hits = new ArrayList<>();
-    private final List<Animation> hoverAnims = new ArrayList<>();
-    private int mouseX, mouseY;
 
-    private static final String[] BUTTONS = {
-            "Одиночная игра",
-            "Сетевая игра",
-            "Настройки",
-            "Настройки Aurora",
-            "Выход из игры"
-    };
+    /* ------------------------------------------------------------------ */
+    /*  Дым: параметры в плоских массивах (нулевые аллокации в кадре)      */
+    /* ------------------------------------------------------------------ */
 
-    private static class Particle {
-        float x, y, speed, size, phase, drift;
+    private static final int LAYER_FAR = 10;  // дальний дым: большой, медленный, тусклее
+    private static final int LAYER_MID = 8;   // средний слой — основной объём дыма
+    private static final int LAYER_NEAR = 8;  // ближний дым поверх контента (по углам)
+    private static final int PUFFS = LAYER_FAR + LAYER_MID + LAYER_NEAR;
 
-        Particle(Random random, int w, int h) {
-            x = random.nextFloat() * w;
-            y = random.nextFloat() * h;
-            speed = 6 + random.nextFloat() * 14;
-            size = 1 + random.nextFloat() * 1.8f;
-            phase = random.nextFloat() * 6.28f;
-            drift = (random.nextFloat() - 0.5f) * 6;
-        }
+    /** Шаг в массиве puff: x, y, r, speed, swayAmp, swayFreq, phase, alpha. */
+    private static final int PF = 8;
+    private final float[] puff = new float[PUFFS * PF];
+
+    /** Пылинки: x, y, speed, size, phase. */
+    private static final int DUST = 26;
+    private static final int DF = 5;
+    private final float[] dust = new float[DUST * DF];
+
+    /** Слой точки дыма: 0 — дальний, 1 — средний, 2 — ближний. */
+    private static int layerOf(int i) {
+        return i < LAYER_FAR ? 0 : (i < LAYER_FAR + LAYER_MID ? 1 : 2);
     }
+
+    /* ------------------------------------------------------------------ */
+    /*  Кнопки                                                            */
+    /* ------------------------------------------------------------------ */
+
+    private static final String[] BT = {
+            "Одиночная игра", "Сетевая игра",
+            "Настройки", "Меню Aurora", "Выход"
+    };
+    private static final int MAIN_BTNS = 5;
+
+    /** Плавное наведение: 5 главных + 2 мелкие; нажатие — только главные. */
+    private final Animation[] hoverAnims = new Animation[MAIN_BTNS + 2];
+    private final Animation[] pressAnims = new Animation[MAIN_BTNS];
+    /** Плавный параллакс дыма за курсором. */
+    private final Animation parallaxX = new Animation(0, 4.5f);
+    private final Animation parallaxY = new Animation(0, 4.5f);
+
+    /** Момент рождения экрана — от него отсчитываются все каскады появления. */
+    private long bornAt;
+
+    /** Кэш строк, чтобы не собирать их каждый кадр. */
+    private String nick = "игрок";
+    private String versionLine;
+    private String fpsLine = "0 fps";
+    private long fpsLineAt;
+
+    private int lastW = -1;
+    private int lastH = -1;
+    private int mouseX;
+    private int mouseY;
+
+    private final List<Hit> hits = new ArrayList<>();
 
     private record Hit(int x, int y, int w, int h, Runnable action) {
     }
@@ -70,79 +112,220 @@ public class AuroraTitleScreen extends Screen {
     public AuroraTitleScreen() {
         super(Component.literal("Aurora"));
         this.theme = AuroraClient.theme();
+        this.bornAt = FrameClock.now();
+        for (int i = 0; i < hoverAnims.length; i++) {
+            hoverAnims[i] = new Animation(0, 13);
+        }
+        for (int i = 0; i < pressAnims.length; i++) {
+            pressAnims[i] = new Animation(0, 20);
+        }
     }
 
     @Override
     protected void init() {
-        particles.clear();
-        Random random = new Random();
-        int count = this.height < 210 ? 24 : 46;
-        for (int i = 0; i < count; i++) {
-            particles.add(new Particle(random, this.width, this.height));
+        // init() вызывается и при смене размера окна — тогда только плавно
+        // масштабируем уже существующий дым, чтобы картинка не «прыгала»
+        if (lastW <= 0 || lastH <= 0 || puff[2] <= 0) {
+            seedPuffs(this.width, this.height);
+        } else if (this.width != lastW || this.height != lastH) {
+            rescalePuffs(lastW, lastH, this.width, this.height);
         }
-        if (hoverAnims.isEmpty()) {
-            for (int i = 0; i < BUTTONS.length + 2; i++) {
-                hoverAnims.add(new Animation(0, 11));
+        lastW = this.width;
+        lastH = this.height;
+
+        Minecraft mc = Minecraft.getInstance();
+        try {
+            LOG.info("титул: gui {}x{}, окно {}x{}, scale {}",
+                    this.width, this.height,
+                    mc.getWindow().getWidth(), mc.getWindow().getHeight(), mc.getWindow().getGuiScale());
+        } catch (Exception ignored) {
+        }
+        if (versionLine == null) {
+            try {
+                nick = mc.getUser().getName();
+            } catch (Exception ignored) {
             }
+            versionLine = "Aurora " + Theme.CLIENT_VERSION + " · клиент для Minecraft " + Theme.MC_VERSION;
         }
-        appear.snap(appear.get() < 1 ? 0 : 1);
-        appear.to(1);
     }
 
     /* ------------------------------------------------------------------ */
-    /*  Фон: панорама + gaussian-блюр + аврора + виньетка                 */
+    /*  Генерация дыма                                                    */
+    /* ------------------------------------------------------------------ */
+
+    private void seedPuffs(int w, int h) {
+        Random random = new Random(0xC0FFEEL);
+        for (int i = 0; i < PUFFS; i++) {
+            int layer = layerOf(i);
+            float k = w / 640f;
+            float base = layer == 0 ? 0.42f : (layer == 1 ? 0.26f : 0.18f);
+            puff[i * PF + 0] = random.nextFloat() * w;                                  // x
+            puff[i * PF + 1] = random.nextFloat() * h;                                  // y
+            puff[i * PF + 2] = h * (base + random.nextFloat() * (base * 0.8f));          // радиус
+            puff[i * PF + 3] = (layer == 0 ? 2.6f : layer == 1 ? 5.0f : 8.5f)
+                    * (0.7f + random.nextFloat() * 0.6f);                               // скорость всплытия
+            puff[i * PF + 4] = (12 + random.nextFloat() * 30) * k;                       // амплитуда покачивания
+            puff[i * PF + 5] = 0.08f + random.nextFloat() * 0.12f;                       // частота покачивания
+            puff[i * PF + 6] = random.nextFloat() * 6.2831853f;                          // фаза
+            puff[i * PF + 7] = layer == 0 ? 52 + random.nextFloat() * 16
+                    : layer == 1 ? 46 + random.nextFloat() * 15
+                    : 18 + random.nextFloat() * 8;                                      // альфа
+        }
+        for (int i = 0; i < DUST; i++) {
+            dust[i * DF + 0] = random.nextFloat() * w;
+            dust[i * DF + 1] = random.nextFloat() * h;
+            dust[i * DF + 2] = 2.5f + random.nextFloat() * 6f;
+            dust[i * DF + 3] = 0.9f + random.nextFloat() * 1.3f;
+            dust[i * DF + 4] = random.nextFloat() * 6.2831853f;
+        }
+    }
+
+    private void rescalePuffs(int oldW, int oldH, int newW, int newH) {
+        float kx = newW / (float) oldW;
+        float ky = newH / (float) oldH;
+        for (int i = 0; i < PUFFS; i++) {
+            puff[i * PF + 0] *= kx;
+            puff[i * PF + 1] *= ky;
+            puff[i * PF + 2] *= ky;
+            puff[i * PF + 4] *= kx;
+        }
+        for (int i = 0; i < DUST; i++) {
+            dust[i * DF + 0] *= kx;
+            dust[i * DF + 1] *= ky;
+        }
+    }
+
+    /* ------------------------------------------------------------------ */
+    /*  Фон: градиент + северное сияние + дым + пыль + затемнение боков    */
     /* ------------------------------------------------------------------ */
 
     @Override
     public void renderBackground(GuiGraphics g, int mx, int my, float delta) {
-        // вращающаяся панорама мира
-        try {
-            renderPanorama(g, delta);
-        } catch (Exception ignored) {
-            g.fill(0, 0, this.width, this.height, ColorUtil.rgb(10, 11, 20));
-        }
-        // настоящее размытие фона (гауссово) — ровно один вызов за кадр
-        try {
-            renderBlurredBackground(g);
-        } catch (IllegalStateException ignored) {
-        }
+        this.mouseX = mx;
+        this.mouseY = my;
+        float elapsed = (FrameClock.now() - bornAt) / 1000.0f;
+        float t = FrameClock.seconds();
+        // дым «проявляется» первые ~2.2 секунды
+        float dens = Animation.smooth(elapsed / 2.2f);
 
-        // тёмный градиент поверх — мягче, чтобы панорама просвечивала сквозь стекло
-        g.fillGradient(0, 0, this.width, this.height,
-                ColorUtil.rgba(9, 10, 17, 95), ColorUtil.rgba(8, 9, 14, 135));
+        // параллакс дыма за курсором (плавный, инерционный)
+        parallaxX.to(mx - this.width / 2f);
+        parallaxY.to(my - this.height / 2f);
+        float px = parallaxX.update();
+        float py = parallaxY.update();
 
-        // мягкие «ленты северного сияния» — большие мягкие пятна света
-        long time = System.currentTimeMillis();
-        float appearT = Animation.smooth(appear.get());
-        for (int i = 0; i < 3; i++) {
-            float gx = this.width * (0.22f + 0.28f * i)
-                    + (float) Math.sin(time / (9000.0 + 4000 * i) + i * 2.1) * this.width * 0.16f;
-            float gy = this.height * (0.30f + 0.20f * ((i + 1) % 3))
-                    + (float) Math.cos(time / (11000.0 + 3000 * i) + i) * this.height * 0.10f;
-            int rw = this.width / 2;
-            int rh = this.height / 2;
-            int alpha = (int) (26 * appearT);
-            RenderUtil.glow(g, gx - rw / 2f, gy - rh / 2f, rw, rh,
-                    ColorUtil.alpha(theme.accent((i + 0.5f) / 3f), alpha));
-        }
+        int h = this.height;
+        int w = this.width;
 
-        // частицы-светлячки: мягкий ореол + яркое ядро
-        int pAlpha = (int) (255 * appearT);
-        for (Particle p : particles) {
-            float px = p.x + (float) Math.sin(time / 2000.0 + p.phase) * 8 + p.drift * (time % 10000) / 10000.0f;
-            float py = p.y - (time / 1000.0f * p.speed) % (this.height + 40);
-            if (py < -10) {
-                py += this.height + 40;
+        // ===== градиент: центр светлее, края уйдут в затемнение =====
+        g.fillGradient(0, 0, w, h / 2,
+                ColorUtil.rgb(13, 15, 27), ColorUtil.rgb(21, 23, 41));
+        g.fillGradient(0, h / 2, w, h,
+                ColorUtil.rgb(21, 23, 41), ColorUtil.rgb(9, 10, 20));
+
+        int accent = theme.accentNow();
+
+        // ===== «северное сияние»: широкая медленная полоса над центром =====
+        float bandX = w / 2f + (float) Math.sin(t * 0.05f) * w * 0.18f;
+        int auroraCol = ColorUtil.lerp(ColorUtil.rgb(96, 108, 148), accent, 0.55f);
+        GfxEngine.radial(g, bandX, h * 0.16f, Math.max(w, h) * 0.85f,
+                ColorUtil.alpha(auroraCol, (int) (30 * dens)),
+                ColorUtil.alpha(auroraCol, 0));
+
+        // ===== световой колодец по центру (иконка будет «в свете») =====
+        GfxEngine.radial(g, w / 2f, h * 0.30f, Math.max(w, h) * 0.62f,
+                ColorUtil.alpha(ColorUtil.rgb(120, 130, 175), (int) (20 * dens)),
+                ColorUtil.alpha(ColorUtil.rgb(120, 130, 175), 0));
+
+        // ===== дым =====
+        // цвета слоёв: холодный сине-серый с примесью акцента
+        int slate = ColorUtil.rgb(96, 108, 148);
+        int colFar = ColorUtil.lerp(slate, accent, 0.42f);
+        int colMid = ColorUtil.lerp(slate, accent, 0.58f);
+
+        for (int i = 0; i < PUFFS; i++) {
+            if (layerOf(i) == 2) {
+                continue; // ближний слой рисуется поверх контента
             }
-            float twinkle = 0.4f + 0.6f * (float) Math.abs(Math.sin(time / 700.0 + p.phase));
-            float d = Math.max(1.6f, p.size * 1.6f);
-            int tw = (int) (70 * twinkle * pAlpha / 255f);
-            GfxEngine.circle(g, px, py, d * 2.6f, ColorUtil.rgba(255, 255, 255, tw / 3));
-            GfxEngine.circle(g, px, py, d, ColorUtil.rgba(255, 255, 255, tw));
+            drawPuff(g, i, t, dens, px, py, colFar, colMid);
         }
 
-        // виньетка
-        RenderUtil.vignette(g, this.width, this.height, ColorUtil.rgba(0, 0, 0, 125));
+        // ===== свечение снизу — «дышит» =====
+        float pulse = 0.72f + 0.28f * (float) Math.sin(t * 0.6);
+        GfxEngine.radial(g, w / 2f, h * 1.04f, h * 1.55f,
+                ColorUtil.alpha(accent, (int) (52 * pulse * dens)),
+                ColorUtil.alpha(accent, 0));
+
+        // ===== пылинки =====
+        for (int i = 0; i < DUST; i++) {
+            float x0 = dust[i * DF + 0];
+            float speed = dust[i * DF + 2];
+            float size = dust[i * DF + 3];
+            float phase = dust[i * DF + 4];
+            float span = h + 20;
+            float y = wrap(x0 - t * speed, -10, span);
+            float x = x0 + (float) Math.sin(t * 0.4f + phase) * 6f;
+            float twinkle = 0.45f + 0.55f * (float) Math.abs(Math.sin(t * 0.9f + phase * 2.1f));
+            GfxEngine.circle(g, x, y, size,
+                    ColorUtil.rgba(255, 255, 255, (int) (74 * twinkle * dens)));
+        }
+
+        // ===== затемнение по бокам (вместо сплошной чёрной подложки) =====
+        float side = 0.34f; // доля ширины, которую занимает каждое затемнение
+        GfxEngine.gradientH(g, 0, 0, w * side, h,
+                ColorUtil.rgba(0, 0, 0, (int) (132 * dens)),
+                ColorUtil.rgba(0, 0, 0, 0));
+        GfxEngine.gradientH(g, w * (1f - side), 0, w * side, h,
+                ColorUtil.rgba(0, 0, 0, 0),
+                ColorUtil.rgba(0, 0, 0, (int) (132 * dens)));
+
+        // мягкая общая виньетка — не глушит дым по углам
+        RenderUtil.vignette(g, w, h, ColorUtil.rgba(0, 0, 0, 40));
+    }
+
+    /** Одна точка дыма: всплытие + покачивание + параллакс слоя. */
+    private void drawPuff(GuiGraphics g, int i, float t, float dens, float px, float py, int colFar, int colMid) {
+        int layer = layerOf(i);
+        float x0 = puff[i * PF + 0];
+        float y0 = puff[i * PF + 1];
+        float r = puff[i * PF + 2];
+        float speed = puff[i * PF + 3];
+        float amp = puff[i * PF + 4];
+        float freq = puff[i * PF + 5];
+        float phase = puff[i * PF + 6];
+        float alpha = puff[i * PF + 7];
+
+        float span = this.height + r * 4;
+        float y = wrap(y0 - t * speed, -r * 2, span);
+        float x = x0 + (float) Math.sin(t * freq + phase) * amp;
+
+        // параллакс: дальний слой почти не двигается, средний — заметнее
+        float kx = layer == 0 ? 0.022f : 0.05f;
+        float ky = layer == 0 ? 0.012f : 0.026f;
+        x += px * kx;
+        y += py * ky;
+
+        // медленное «дыхание» плотности
+        float breathe = 0.82f + 0.18f * (float) Math.sin(t * 0.33f + phase);
+        int col = layer == 0 ? colFar : colMid;
+        int core = ColorUtil.alpha(col, (int) (alpha * breathe * dens));
+        if (ColorUtil.alphaI(core) <= 0) {
+            return;
+        }
+        GfxEngine.radial(g, x, y, r * 2, core, ColorUtil.alpha(col, 0));
+    }
+
+    /** Циклическое значение в диапазоне [min, max). */
+    private static float wrap(float v, float min, float max) {
+        float range = max - min;
+        if (range <= 0) {
+            return min;
+        }
+        float f = (v - min) % range;
+        if (f < 0) {
+            f += range;
+        }
+        return min + f;
     }
 
     /* ------------------------------------------------------------------ */
@@ -151,217 +334,218 @@ public class AuroraTitleScreen extends Screen {
 
     @Override
     public void render(GuiGraphics g, int mx, int my, float delta) {
-        this.mouseX = mx;
-        this.mouseY = my;
         hits.clear();
-        float t = Animation.smooth(appear.update());
-
         Minecraft mc = Minecraft.getInstance();
+        float elapsed = (FrameClock.now() - bornAt) / 1000.0f;
+        float t = FrameClock.seconds();
 
-        // ===== адаптивная вёрстка =====
-        boolean tiny = this.height < 210;
-        boolean full = !tiny && this.height >= 310;
-        int logoScale = tiny ? 2 : full ? 3 : 2;
-        int bh = tiny ? 20 : full ? 30 : 24;
-        int gap = tiny ? 3 : full ? 7 : 4;
-        int bw = Math.min(260, this.width - 64);
-        int pad = tiny ? 10 : full ? 24 : 16;
-
-        // ===== размеры стеклянной карточки =====
-        int logoW = RenderUtil.widthBold(font, Theme.CLIENT_NAME, theme) * logoScale;
-        int logoH = RenderUtil.fontHeight(font) * logoScale;
-        int stackH = BUTTONS.length * bh + (BUTTONS.length - 1) * gap;
-        int subH = tiny ? 0 : full ? 26 : 12;
-        int cardH = pad + logoH + 8 + subH + (tiny ? 8 : 12) + stackH + pad - 4;
-        int cardW = bw + pad * 2;
-        int cardX = this.width / 2 - cardW / 2;
-        int cardY = Math.max(8, this.height / 2 - cardH / 2);
-        cardH = Math.min(cardH, this.height - 16);
-
-        // ===== фаза 1: формы =====
-        // плавное появление карточки (масштаб вокруг центра)
-        g.pose().pushMatrix();
-        float sc = theme.animations ? 0.97f + 0.03f * t : 1f;
-        float ccx = this.width / 2f;
-        float ccy = this.height / 2f;
-        g.pose().translate(ccx, ccy);
-        g.pose().scale(sc, sc);
-        g.pose().translate(-ccx, -ccy);
-
-        RenderUtil.softShadow(g, cardX, cardY, cardW, cardH, 18, 150);
-        // стеклянная карточка: база + светлый градиент-блик + обводка
-        GfxEngine.rounded(g, cardX, cardY, cardW, cardH, 18,
-                ColorUtil.alpha(theme.panelColor(), (int) (ColorUtil.alphaI(theme.panelColor()) * t)));
-        GfxEngine.roundedGradient(g, cardX, cardY, cardW, cardH, 18,
-                ColorUtil.rgba(255, 255, 255, (int) (26 * t)), ColorUtil.rgba(255, 255, 255, (int) (4 * t)));
-        GfxEngine.outline(g, cardX, cardY, cardW, cardH, 18, ColorUtil.rgba(255, 255, 255, (int) (44 * t)), 1f);
-        GfxEngine.rounded(g, cardX + 20, cardY + 1, cardW - 40, 1, 0.5f, ColorUtil.rgba(255, 255, 255, (int) (70 * t)));
-
-        // логотип и линия-акцент под ним
-        int lx = this.width / 2 - logoW / 2 - (int) ((1 - t) * 14);
-        int ly = cardY + pad;
-        RenderUtil.glow(g, lx - logoW / 2f, ly - logoH / 2f - 2, logoW * 2.4f, logoH * 2.4f,
-                ColorUtil.alpha(theme.accentNow(), (int) (46 * t)));
-        float lineW = Math.max(24, logoW * 0.36f);
-        GfxEngine.rounded(g, this.width / 2f - lineW / 2, ly + logoH + 3.5f, lineW, 1.5f, 0.75f,
-                ColorUtil.alpha(theme.accentNow(), (int) (190 * t)));
-
-        // кнопки (формы)
-        int by = cardY + cardH - pad - stackH;
-        int bx = this.width / 2 - bw / 2;
-        for (int i = 0; i < BUTTONS.length; i++) {
-            by = drawButtonShape(g, bx, by, bw, bh, i, t, gap);
+        // все анимации кадра обновляются ровно один раз — здесь
+        for (Animation a : hoverAnims) {
+            a.update();
+        }
+        for (Animation a : pressAnims) {
+            a.update();
         }
 
-        // нижний ряд мелких кнопок (формы)
-        int sbY = this.height - (tiny ? 20 : 32);
+        boolean compact = this.height < 300;
+        int w = this.width;
+        int h = this.height;
+
+        // ===== бренд-иконка =====
+        int iconSize = compact ? 44 : 64;
+        float it = Animation.easeOutBack(clamp01((elapsed - 0.05f) / 0.75f));
+        float iconCy = h * 0.26f + (1 - it) * -26;
+        float bob = (float) Math.sin(t * 0.8f) * 2.2f; // мягкое покачивание
+        float iconAlpha = clamp01(it);
+
+        // дыхание свечения вокруг иконки
+        float gpulse = 0.62f + 0.38f * (float) Math.sin(t * 0.9f);
+        g.pose().pushMatrix();
+        float isc = 0.82f + 0.18f * it;
+        g.pose().translate(w / 2f, iconCy + bob);
+        g.pose().scale(isc, isc);
+        g.pose().translate(-w / 2f, -(iconCy + bob));
+        IconPainter.draw(g, w / 2f, iconCy + bob, iconSize,
+                (int) (72 * gpulse * iconAlpha));
+        g.pose().popMatrix();
+
+        // ===== приветствие: «С возвращением, <ник>» =====
+        float ht = Animation.smooth(clamp01((elapsed - 0.35f) / 0.65f));
+        float headSize = compact ? 10.5f : 14f;
+        String prefix = "С возвращением, ";
+        float pw = RenderUtil.widthSize(prefix, headSize, false);
+        float nw = RenderUtil.widthSize(nick, headSize, true);
+        float headY = iconCy + iconSize / 2f + 10 + (1 - ht) * 10;
+        if (ht > 0.01f) {
+            float hx = w / 2f - (pw + nw) / 2f;
+            RenderUtil.drawTextSize(g, font, prefix, hx, headY, headSize,
+                    ColorUtil.alpha(theme.textPrimary(), (int) (240 * ht)), false, theme);
+            RenderUtil.drawTextSize(g, font, nick, hx + pw, headY, headSize,
+                    ColorUtil.alpha(theme.accentNow(), (int) (255 * ht)), true, theme);
+        }
+
+        // ===== подпись с версией =====
+        float st = Animation.smooth(clamp01((elapsed - 0.5f) / 0.6f));
+        float subY = headY + headSize + 5;
+        if (st > 0.01f) {
+            RenderUtil.drawCenteredText(g, font, versionLine, w / 2f, subY,
+                    ColorUtil.alpha(theme.textSecondary(), (int) (205 * st)), theme);
+        }
+
+        // ===== кнопки =====
+        int row1H = compact ? 26 : 36;
+        int row2H = compact ? 22 : 30;
+        int row1W = compact ? 178 : 224;
+        int row2W = compact ? 116 : 146;
+        int gap = compact ? 6 : 10;
+        int row1Y = Math.round(subY + (compact ? 13 : 22));
+        int row2Y = row1Y + row1H + gap + 2;
+
+        int bx = w / 2 - row1W - gap / 2;
+        button(g, 0, bx, row1Y, row1W, row1H, elapsed);
+        button(g, 1, bx + row1W + gap, row1Y, row1W, row1H, elapsed);
+
+        int row2Total = row2W * 3 + gap * 2;
+        bx = w / 2 - row2Total / 2;
+        for (int i = 2; i < 5; i++) {
+            button(g, i, bx, row2Y, row2W, row2H, elapsed);
+            bx += row2W + gap;
+        }
+
+        // ===== ближний дым (поверх контента, по нижним углам, едва заметный) =====
+        int accent = theme.accentNow();
+        int slate = ColorUtil.rgb(96, 108, 148);
+        int colNear = ColorUtil.lerp(slate, accent, 0.68f);
+        float dens = Animation.smooth(elapsed / 2.2f);
+        for (int i = 0; i < PUFFS; i++) {
+            if (layerOf(i) != 2) {
+                continue;
+            }
+            drawNearPuff(g, i, t, dens, colNear);
+        }
+
+        // ===== мелкие кнопки справа снизу =====
+        float ft = Animation.smooth(clamp01((elapsed - 0.85f) / 0.6f));
+        int sbY = this.height - (compact ? 22 : 34);
         int sbX = this.width - 10;
-        sbX = smallButtonShape(g, sbX, sbY, "Спец. возможности", BUTTONS.length, () ->
+        sbX = smallButton(g, sbX, sbY, "Спец. возможности", MAIN_BTNS, ft, () ->
                 mc.setScreen(new AccessibilityOptionsScreen(this, mc.options)));
-        smallButtonShape(g, sbX, sbY, "Язык", BUTTONS.length + 1, () ->
+        smallButton(g, sbX, sbY, "Язык", MAIN_BTNS + 1, ft, () ->
                 mc.setScreen(new LanguageSelectScreen(this, mc.options, mc.getLanguageManager())));
 
-        g.pose().popMatrix();
-
-        g.nextStratum();
-
-        // ===== фаза 2: текст =====
-        g.pose().pushMatrix();
-        g.pose().translate(ccx, ccy);
-        g.pose().scale(sc, sc);
-        g.pose().translate(-ccx, -ccy);
-
-        // градиентный логотип по символам
-        g.pose().pushMatrix();
-        g.pose().translate(lx, ly);
-        g.pose().scale(logoScale, logoScale);
-        RenderUtil.drawGradientText(g, font, Theme.CLIENT_NAME, 0, 0, theme.accentNow(), theme.accent(1.0f), theme);
-        g.pose().popMatrix();
-
-        int textY = ly + logoH + 8;
-        if (full) {
-            RenderUtil.drawCenteredText(g, font, "клиент для Minecraft " + Theme.MC_VERSION,
-                    this.width / 2f, textY, ColorUtil.alpha(theme.textSecondary(), (int) (220 * t)), theme);
-            textY += 12;
-            RenderUtil.drawCenteredText(g, font, "С возвращением, " + mc.getUser().getName(),
-                    this.width / 2f, textY, ColorUtil.alpha(theme.accentNow(), (int) (255 * t)), theme);
-        } else if (!tiny) {
-            RenderUtil.drawCenteredText(g, font, "С возвращением, " + mc.getUser().getName(),
-                    this.width / 2f, textY, ColorUtil.alpha(theme.textSecondary(), (int) (220 * t)), theme);
-        }
-
-        // подписи кнопок
-        int ty = cardY + cardH - pad - stackH;
-        int tx = this.width / 2 - bw / 2;
-        for (int i = 0; i < BUTTONS.length; i++) {
-            ty = drawButtonText(g, tx, ty, bw, bh, i, t, gap);
-        }
-
-        // мелкие кнопки: подписи
-        int stx = this.width - 10;
-        stx = smallButtonText(g, stx, sbY, "Спец. возможности", BUTTONS.length);
-        smallButtonText(g, stx, sbY, "Язык", BUTTONS.length + 1);
-
-        g.pose().popMatrix();
-
         // ===== подписи по углам =====
-        if (tiny) {
-            String line = "Aurora " + Theme.CLIENT_VERSION + " · " + mc.getFps() + " fps";
-            RenderUtil.drawText(g, font, line, 8, this.height - 12, theme.textSecondary(), theme);
+        if (ft > 0.01f) {
+            if (compact) {
+                RenderUtil.drawText(g, font, "Aurora " + Theme.CLIENT_VERSION + " · " + mc.getFps() + " fps",
+                        8, this.height - 12, ColorUtil.alpha(theme.textSecondary(), (int) (200 * ft)), theme);
+            } else {
+                RenderUtil.drawText(g, font, versionLine, 8, this.height - 12,
+                        ColorUtil.alpha(theme.textSecondary(), (int) (215 * ft)), theme);
+                // fps обновляем не чаще 2 раз в секунду
+                long now = FrameClock.now();
+                if (now - fpsLineAt > 500) {
+                    fpsLineAt = now;
+                    fpsLine = mc.getFps() + " fps";
+                }
+                RenderUtil.drawText(g, font, fpsLine,
+                        this.width - 10 - RenderUtil.width(font, fpsLine, theme), this.height - 12,
+                        ColorUtil.alpha(theme.textSecondary(), (int) (215 * ft)), theme);
+            }
+        }
+    }
+
+    /** Ближний дым: всплывает снизу вдоль углов, чтобы не мешать кнопкам. */
+    private void drawNearPuff(GuiGraphics g, int i, float t, float dens, int colNear) {
+        float x0 = puff[i * PF + 0];
+        float y0 = puff[i * PF + 1];
+        float r = puff[i * PF + 2];
+        float speed = puff[i * PF + 3];
+        float amp = puff[i * PF + 4];
+        float freq = puff[i * PF + 5];
+        float phase = puff[i * PF + 6];
+        float alpha = puff[i * PF + 7];
+
+        // прижимаем к нижней половине экрана
+        float span = this.height + r * 4;
+        float y = this.height * 0.55f + wrap(y0 - t * speed, 0, span * 0.6f);
+        float x = x0 + (float) Math.sin(t * freq + phase) * amp + parallaxX.get() * 0.09f;
+        float breathe = 0.8f + 0.2f * (float) Math.sin(t * 0.4f + phase);
+        int core = ColorUtil.alpha(colNear, (int) (alpha * breathe * dens));
+        if (ColorUtil.alphaI(core) > 0) {
+            GfxEngine.radial(g, x, y, r * 2, core, ColorUtil.alpha(colNear, 0));
+        }
+    }
+
+    /* ------------------------------------------------------------------ */
+    /*  Кнопки                                                            */
+    /* ------------------------------------------------------------------ */
+
+    private void button(GuiGraphics g, int index, int x, int y, int w, int h, float elapsed) {
+        // каскад: каждая кнопка появляется чуть позже предыдущей
+        float bt = Animation.easeOutCubic(clamp01((elapsed - 0.3f - index * 0.08f) / 0.5f));
+        if (bt <= 0.01f) {
+            return;
+        }
+        float by = y + (1 - bt) * 16;
+
+        Animation hover = hoverAnims[index];
+        boolean inside = bt > 0.85f && mouseX >= x && mouseX <= x + w && mouseY >= by && mouseY <= by + h;
+        hover.to(inside ? 1 : 0);
+        float hv = hover.get();
+        float press = pressAnims[index].get();
+
+        boolean primary = index == 0; // «Одиночная игра» — акцентная
+
+        // мягкое свечение за кнопкой при наведении
+        if (hv > 0.02f) {
+            GfxEngine.dropShadow(g, x - 1, by - 1, w + 2, h + 2, h / 2f, 1.5f, 9f,
+                    ColorUtil.alpha(theme.accentNow(), (int) ((primary ? 76 : 58) * hv * bt)));
+        }
+
+        // масштаб: наведение чуть увеличивает, нажатие — мягко сжимает
+        float sc = (1f + 0.028f * hv) * (1f - 0.035f * press);
+        g.pose().pushMatrix();
+        g.pose().translate(x + w / 2f, by + h / 2f);
+        g.pose().scale(sc, sc);
+        g.pose().translate(-(x + w / 2f), -(by + h / 2f));
+
+        if (primary) {
+            // primary: фирменный градиент акцента + белая обводка
+            int gradTop = ColorUtil.lerp(theme.accent(0.05f), theme.accent(0.3f), hv);
+            int gradBottom = ColorUtil.lerp(theme.accent(0.95f), theme.accent(0.7f), hv);
+            GfxEngine.roundedGradient(g, x, by, w, h, h / 3f,
+                    ColorUtil.alpha(gradTop, (int) (238 * bt)),
+                    ColorUtil.alpha(gradBottom, (int) (238 * bt)));
+            GfxEngine.outline(g, x, by, w, h, h / 3f,
+                    ColorUtil.rgba(255, 255, 255, (int) ((58 + 40 * hv) * bt)), 1f);
+            int textColor = ColorUtil.rgb(255, 255, 255);
+            RenderUtil.drawCenteredText(g, font, BT[index], x + w / 2f,
+                    by + h / 2f - RenderUtil.fontHeight(font) / 2f + 1,
+                    ColorUtil.alpha(textColor, (int) (255 * bt)), theme);
         } else {
-            RenderUtil.drawText(g, font, "Aurora Client " + Theme.CLIENT_VERSION + " · " + Theme.MC_VERSION,
-                    8, this.height - 12, theme.textSecondary(), theme);
-            int enabledCount = ModuleManager.enabled().size();
-            RenderUtil.drawText(g, font, "© terem90 · модулей включено: " + enabledCount,
-                    8, this.height - 24, ColorUtil.alpha(theme.textSecondary(), 130), theme);
-            String fps = mc.getFps() + " fps";
-            RenderUtil.drawText(g, font, fps, this.width - 10 - RenderUtil.width(font, fps, theme),
-                    this.height - 12, theme.textSecondary(), theme);
-        }
-    }
+            int fill = ColorUtil.lerp(ColorUtil.rgba(27, 30, 46, 208), ColorUtil.rgba(56, 61, 92, 242), hv);
+            GfxEngine.rounded(g, x, by, w, h, h / 3f,
+                    ColorUtil.alpha(fill, (int) (ColorUtil.alphaI(fill) * bt)));
+            int outline = ColorUtil.lerp(ColorUtil.rgba(255, 255, 255, 34),
+                    ColorUtil.alpha(theme.accentNow(), 210), hv);
+            GfxEngine.outline(g, x, by, w, h, h / 3f,
+                    ColorUtil.alpha(outline, (int) (ColorUtil.alphaI(outline) * bt)), 1f);
 
-    /** Форма кнопки с lerp-наведением. Возвращает y следующей кнопки. */
-    private int drawButtonShape(GuiGraphics g, int x, int y, int w, int h, int index, float appearT, int gap) {
-        float delay = index * 0.06f;
-        float bt = Animation.smooth(Math.max(0, Math.min(1, (appearT - delay) / Math.max(0.001f, 1 - delay))));
-        int offsetY = (int) ((1 - bt) * 10);
-        int alpha = (int) (255 * bt);
-        int by = y + offsetY;
-        if (alpha < 6) {
-            return y + h + gap;
-        }
-
-        Animation hoverAnim = hoverAnims.get(index);
-        boolean hover = bt > 0.9f && mouseX >= x && mouseX <= x + w && mouseY >= by && mouseY <= by + h;
-        hoverAnim.to(hover ? 1 : 0);
-        float hv = hoverAnim.update();
-
-        // кнопка мягко увеличивается при наведении
-        g.pose().pushMatrix();
-        float scb = 1f + 0.018f * hv;
-        g.pose().translate(x + w / 2f, by + h / 2f);
-        g.pose().scale(scb, scb);
-        g.pose().translate(-(x + w / 2f), -(by + h / 2f));
-
-        // акцентное свечение под кнопкой при наведении
-        if (hv > 0.05f) {
-            GfxEngine.glow(g, x, by, w, h, h / 2f, 9f,
-                    ColorUtil.alpha(theme.accentNow(), (int) (60 * hv)));
-        }
-
-        // стеклянная кнопка: полупрозрачная база + блик-градиент + обводка
-        int baseA = (int) (110 * bt);
-        int hoverA = (int) (150 * hv);
-        GfxEngine.rounded(g, x, by, w, h, h / 2f,
-                ColorUtil.lerp(ColorUtil.rgba(12, 14, 22, baseA), ColorUtil.rgba(18, 20, 32, hoverA), hv));
-        GfxEngine.roundedGradient(g, x, by, w, h, h / 2f,
-                ColorUtil.rgba(255, 255, 255, (int) (18 * bt)), ColorUtil.rgba(255, 255, 255, (int) (3 * bt)));
-        GfxEngine.outline(g, x, by, w, h, h / 2f, ColorUtil.lerp(
-                ColorUtil.rgba(255, 255, 255, (int) (40 * bt)),
-                ColorUtil.alpha(theme.accentNow(), 200), hv), 1f);
-        // светлая кромка сверху
-        float inset = Math.min(h / 2f, w / 2f);
-        GfxEngine.rounded(g, x + inset, by + 1, Math.max(2, w - inset * 2), 1, 0.5f,
-                ColorUtil.rgba(255, 255, 255, (int) (46 * bt)));
-
-        g.pose().popMatrix();
-
-        final int fby = by;
-        if (bt > 0.9f) {
-            hits.add(new Hit(x, fby, w, h, () -> onButton(index)));
-        }
-        return y + h + gap;
-    }
-
-    /** Подпись кнопки. Возвращает y следующей кнопки. */
-    private int drawButtonText(GuiGraphics g, int x, int y, int w, int h, int index, float appearT, int gap) {
-        float delay = index * 0.06f;
-        float bt = Animation.smooth(Math.max(0, Math.min(1, (appearT - delay) / Math.max(0.001f, 1 - delay))));
-        int offsetY = (int) ((1 - bt) * 10);
-        int alpha = (int) (255 * bt);
-        int by = y + offsetY;
-        if (alpha < 6) {
-            return y + h + gap;
-        }
-        float hv = hoverAnims.get(index).get();
-        int textColor = ColorUtil.lerp(theme.textPrimary(), ColorUtil.rgb(255, 255, 255), hv);
-
-        // тот же hover-масштаб, что у формы — текст не отходит от кнопки
-        g.pose().pushMatrix();
-        float scb = 1f + 0.018f * hv;
-        g.pose().translate(x + w / 2f, by + h / 2f);
-        g.pose().scale(scb, scb);
-        g.pose().translate(-(x + w / 2f), -(by + h / 2f));
-        RenderUtil.drawCenteredText(g, font, BUTTONS[index], x + w / 2f, by + h / 2f - RenderUtil.fontHeight(font) / 2f + 1,
-                ColorUtil.alpha(textColor, alpha), theme);
-        // стрелка-шеврон слева: раньше тут была «каретка»-полоска, которую
-        // можно было спутать с текстовым курсором
-        if (hv > 0.03f) {
-            RenderUtil.drawText(g, font, "›", x + 14, by + h / 2f - RenderUtil.fontHeight(font) / 2f + 1,
-                    ColorUtil.alpha(theme.accentNow(), (int) (230 * hv)), theme);
+            int textColor = ColorUtil.lerp(theme.textSecondary(), ColorUtil.rgb(255, 255, 255), hv);
+            RenderUtil.drawCenteredText(g, font, BT[index], x + w / 2f,
+                    by + h / 2f - RenderUtil.fontHeight(font) / 2f + 1,
+                    ColorUtil.alpha(textColor, (int) (255 * bt)), theme);
         }
         g.pose().popMatrix();
-        return y + h + gap;
+
+        if (bt > 0.85f) {
+            final int fby = Math.round(by);
+            hits.add(new Hit(x, fby, w, h, () -> {
+                pressAnims[index].snap(1);
+                pressAnims[index].to(0);
+                onButton(index);
+            }));
+        }
     }
 
     private void onButton(int index) {
@@ -371,34 +555,40 @@ public class AuroraTitleScreen extends Screen {
             case 0 -> mc.setScreen(new SelectWorldScreen(this));
             case 1 -> mc.setScreen(new JoinMultiplayerScreen(this));
             case 2 -> mc.setScreen(new OptionsScreen(this, mc.options));
-            case 3 -> mc.setScreen(new AuroraClickGui(this));
+            case 3 -> mc.setScreen(new AuroraClickGui());
             default -> mc.stop();
         }
     }
 
-    /** Форма мелкой кнопки. Возвращает x для следующей (левее). */
-    private int smallButtonShape(GuiGraphics g, int rightX, int y, String label, int animIndex, Runnable action) {
+    /** Мелкая кнопка-пилюля. Возвращает x для следующей (левее). */
+    private int smallButton(GuiGraphics g, int rightX, int y, String label, int animIndex, float appearT, Runnable action) {
         int tw = RenderUtil.width(font, label, theme) + 18;
         int bx = rightX - tw;
-        boolean hover = mouseX >= bx && mouseX <= rightX && mouseY >= y && mouseY <= y + 20;
-        Animation hoverAnim = hoverAnims.get(animIndex);
-        hoverAnim.to(hover ? 1 : 0);
-        float hv = hoverAnim.update();
-        int fill = ColorUtil.lerp(ColorUtil.rgba(255, 255, 255, 16), ColorUtil.alpha(theme.accentNow(), 110), hv);
-        RenderUtil.glassChip(g, bx, y, tw, 20, 10, fill,
-                hover ? ColorUtil.alpha(theme.accentNow(), 180) : ColorUtil.rgba(255, 255, 255, 34), theme);
-        hits.add(new Hit(bx, y, tw, 20, action));
+        if (appearT > 0.01f) {
+            Animation hover = hoverAnims[animIndex];
+            boolean inside = mouseX >= bx && mouseX <= rightX && mouseY >= y && mouseY <= y + 20;
+            hover.to(inside ? 1 : 0);
+            float hv = hover.get();
+
+            int fill = ColorUtil.lerp(ColorUtil.rgba(255, 255, 255, 10),
+                    ColorUtil.alpha(theme.accentNow(), 76), hv);
+            GfxEngine.rounded(g, bx, y, tw, 20, 10,
+                    ColorUtil.alpha(fill, (int) (ColorUtil.alphaI(fill) * appearT)));
+            int outline = ColorUtil.lerp(ColorUtil.rgba(255, 255, 255, 16),
+                    ColorUtil.alpha(theme.accentNow(), 130), hv);
+            GfxEngine.outline(g, bx, y, tw, 20, 10,
+                    ColorUtil.alpha(outline, (int) (ColorUtil.alphaI(outline) * appearT)), 1f);
+            int col = ColorUtil.lerp(theme.textSecondary(), ColorUtil.rgb(255, 255, 255), hv);
+            RenderUtil.drawText(g, font, label, bx + 9, y + 10 - RenderUtil.fontHeight(font) / 2f + 1,
+                    ColorUtil.alpha(col, (int) (235 * appearT)), theme);
+
+            hits.add(new Hit(bx, y, tw, 20, action));
+        }
         return bx - 8;
     }
 
-    /** Подпись мелкой кнопки. Возвращает x для следующей (левее). */
-    private int smallButtonText(GuiGraphics g, int rightX, int y, String label, int animIndex) {
-        int tw = RenderUtil.width(font, label, theme) + 18;
-        int bx = rightX - tw;
-        float hv = hoverAnims.get(animIndex).get();
-        RenderUtil.drawText(g, font, label, bx + 9, y + 10 - RenderUtil.fontHeight(font) / 2f + 1,
-                ColorUtil.lerp(theme.textSecondary(), ColorUtil.rgb(255, 255, 255), hv), theme);
-        return bx - 8;
+    private static float clamp01(float v) {
+        return Math.max(0f, Math.min(1f, v));
     }
 
     /* ------------------------------------------------------------------ */
@@ -426,18 +616,10 @@ public class AuroraTitleScreen extends Screen {
     public boolean keyPressed(KeyEvent e) {
         if (e.key() == theme.menuKey) {
             AuroraClickGui.playClick();
-            this.minecraft.setScreen(new AuroraClickGui(this));
+            this.minecraft.setScreen(new AuroraClickGui());
             return true;
         }
         return super.keyPressed(e);
-    }
-
-    @Override
-    public void tick() {
-        appear.update();
-        for (Animation a : hoverAnims) {
-            a.update();
-        }
     }
 
     @Override

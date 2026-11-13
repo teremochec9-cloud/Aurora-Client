@@ -1,48 +1,43 @@
 package dev.aurora.client.util;
 
 import dev.aurora.client.AuroraClient;
+import dev.aurora.client.gui.AuroraClickGui;
+import dev.aurora.client.hud.HudEditorScreen;
 import dev.aurora.client.theme.Theme;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.screens.Screen;
 
 /**
- * Правило владения блюром за меню.
+ * Правило владения блюром за меню Aurora.
  *
- * <p>Факт байткода 1.21.11: ванильный блюр работает во ВСЕХ графических
- * режимах при menuBackgroundBlurriness &gt;= 1 (Screen.renderBlurredBackground
- * проверяет только порог 1.0), и он персистится ванилью в options.txt.</p>
+ * <p>Ванильный gaussian-блюр включается опцией menuBackgroundBlurriness,
+ * которая персистится в options.txt — портить её статикой нельзя
+ * (при краше юзерово значение навсегда уходит в ноль). Поэтому:</p>
  *
- * <p>Поэтому:</p>
  * <ul>
- *   <li><b>свой блюр</b> (Iris не активен): ваниль глушится mixin-cancel'ом
- *       renderBlurredBackground по тумблеру — опция menuBackgroundBlurriness
- *       НЕ трогается вообще (иначе при краше юзерово значение навсегда
- *       уедет в options.txt нулём);</li>
- *   <li><b>fallback</b> (шейдеры/Fabulous): свой блюр выключен, слайдер темы
- *       маппится на ванильную опцию, юзерово значение бэкапится в
- *       aurora.json (см. AuroraConfig.takeVanillaBlurControl/apply/release);
- *       правило порога: 0 = выключено, иначе минимум 1 (ceil) — тумблер
- *       не может быть «включён и не работает»;</li>
- *   <li>свой путь НЕ вызывает GuiGraphics.blurBeforeThisStratum() —
- *       там IllegalStateException("Can only blur once per frame"), чужой
- *       вызов в том же кадре уронит игру; свой блюр рисует собственный quad
- *       на своём FBO.</li>
+ *   <li><b>тумблер «Блюр за меню» включён</b> — Aurora плавно доводит
+ *       ванильную опцию до выбранной силы на время меню и возвращает
+ *       исходное значение при закрытии (applyBlurRamp / originalBlur);</li>
+ *   <li><b>тумблер выключен</b> — ванильный блюр гасится миксином
+ *       {@code ScreenMixin} (cancel renderBlurredBackground) только пока
+ *       открыт экран Aurora: пользовательская опция остаётся нетронутой,
+ *       а тумблер не «включён и не работает» (баг 1.0.5).</li>
  * </ul>
  */
 public final class BlurGuard {
-    /** true только на кадрах, где Aurora реально рисует свой блюр за меню. */
-    public static boolean ownBlurThisFrame;
 
     private BlurGuard() {
     }
 
-    /** Aurora рисует свой блюр в этом кадре и имеет право глушить ваниль. */
+    /** Подавлять ли ванильный блюр в текущем кадре. */
     public static boolean shouldSuppressVanilla() {
-        if (!ownBlurThisFrame) {
+        Minecraft mc = Minecraft.getInstance();
+        Screen screen = mc == null ? null : mc.screen;
+        boolean auroraMenu = screen instanceof AuroraClickGui || screen instanceof HudEditorScreen;
+        if (!auroraMenu) {
             return false;
         }
         Theme t = AuroraClient.theme();
-        if (!t.blur || t.blurStrength <= 0) {
-            return false; // сила 0 = выключено — тумблер не должен лгать
-        }
-        return !IrisGuard.shaderTargetConflict();
+        return !t.blur;
     }
 }

@@ -3,10 +3,18 @@ plugins {
 }
 
 repositories {
-        // Зеркало Maven Central для стабильной загрузки зависимостей
+        // Зеркала Maven Central для стабильной загрузки зависимостей
         maven {
                 name = 'AliyunMirror'
                 url = 'https://maven.aliyun.com/repository/public'
+        }
+        maven {
+                name = 'HuaweiMirror'
+                url = 'https://repo.huaweicloud.com/repository/maven/'
+        }
+        maven {
+                name = 'TencentMirror'
+                url = 'https://mirrors.cloud.tencent.com/nexus/repository/maven-public/'
         }
         mavenCentral()
         // Loom сам подключает репозитории Minecraft и Fabric.
@@ -17,11 +25,10 @@ loom {
 
         runs {
                 client {
-                        client()
-                        // размер окна для локальных тестов/скриншотов
-                        programArgs "--width", "1280", "--height", "800"
-                        // ограничиваем кучу игры, чтобы песочница не уходила в OOM
-                        vmArgs "-Xms256m", "-Xmx768m", "-XX:MaxMetaspaceSize=320m"
+                        // headless-скриншоты: -PauroraShot (в Xvfb окно создаётся по запросу)
+                        if (project.hasProperty("auroraShot")) {
+                                programArgs("--width", "1920", "--height", "1080")
+                        }
                 }
         }
 
@@ -81,4 +88,9 @@ jar {
         from("LICENSE") {
                 rename { "${it}_${project.base.archivesName.get()}" }
         }
+}
+
+afterEvaluate {
+    println "AURORA_RUNS: " + loom.runs.names
+    loom.runs.forEach { r -> println "AURORA_RUN [" + r.name + "] args=" + r.programArgs }
 }

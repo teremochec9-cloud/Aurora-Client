@@ -6,7 +6,8 @@ package dev.aurora.client.module;
 public enum Category {
     VISUAL("Визуал", "Зум, яркость и экранные эффекты"),
     HUD("HUD", "Информационные панели на экране"),
-    CHAT("Чат", "Улучшения игрового чата");
+    CHAT("Чат", "Улучшения игрового чата"),
+    PROF("Производительность", "Оптимизация игры и FPS");
 
     public final String title;
     public final String description;

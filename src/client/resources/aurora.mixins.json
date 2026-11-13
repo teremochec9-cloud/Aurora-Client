@@ -6,12 +6,15 @@
         "client": [
                 "GameRendererMixin",
                 "ScreenEffectRendererMixin",
-                "ScreenMixin",
                 "MouseHandlerMixin",
                 "GuiRendererMixin",
                 "ChatComponentMixin",
                 "ChatScreenMixin",
                 "ChatComponentAccessor",
+                "ScreenMixin",
+                "EntityRenderDispatcherMixin",
+                "EntityShadowMixin",
+                "ParticleEngineMixin",
                 "MinecraftAccessor"
         ],
         "injectors": {

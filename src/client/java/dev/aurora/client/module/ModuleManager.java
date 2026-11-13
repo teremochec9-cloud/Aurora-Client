@@ -3,9 +3,12 @@ package dev.aurora.client.module;
 import dev.aurora.client.module.modules.ChatModule;
 import dev.aurora.client.module.modules.CleanHudModule;
 import dev.aurora.client.module.modules.CustomCrosshairModule;
+import dev.aurora.client.module.modules.EntityShadowsModule;
 import dev.aurora.client.module.modules.FullbrightModule;
 import dev.aurora.client.module.modules.LowFireModule;
 import dev.aurora.client.module.modules.NoHurtCamModule;
+import dev.aurora.client.module.modules.OptimizeModule;
+import dev.aurora.client.module.modules.ParticleModule;
 import dev.aurora.client.module.modules.TargetEspModule;
 import dev.aurora.client.module.modules.ZoomModule;
 import dev.aurora.client.hud.ClockHud;
@@ -35,6 +38,10 @@ public class ModuleManager {
         register(new CleanHudModule());
         register(new CustomCrosshairModule());
         register(new TargetEspModule());
+        // Производительность
+        register(new OptimizeModule());
+        register(new EntityShadowsModule());
+        register(new ParticleModule());
         // HUD
         register(new WatermarkHud());
         register(new FpsHud());

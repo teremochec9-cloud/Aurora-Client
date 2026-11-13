@@ -14,9 +14,7 @@ import dev.aurora.client.module.settings.ColorSetting;
 import dev.aurora.client.module.settings.ModeSetting;
 import dev.aurora.client.module.settings.NumberSetting;
 import dev.aurora.client.module.settings.Setting;
-import dev.aurora.client.profile.ProfileManager;
 import net.fabricmc.loader.api.FabricLoader;
-import net.minecraft.client.Minecraft;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -31,6 +29,8 @@ public final class AuroraConfig {
     private static volatile boolean dirty;
     /** Счётчик тиков для отложенной записи. */
     private static int dirtyTicks;
+    /** Кастомный никнейм профиля (пустая строка — не задан). */
+    public static String nickname = "";
 
     private AuroraConfig() {
     }
@@ -59,52 +59,13 @@ public final class AuroraConfig {
         }
     }
 
-    /** Сохранённый в конфиге никнейм (null — использовать системный). */
-    private static String nickname;
-
-    /** Кламп HUD уже выполнен (окно готово). */
-    private static boolean hudClamped;
-    /** Конфиг был в формате v1 — после первого клампа логируем миграцию. */
-    private static boolean pendingMigrationLog;
-
-    /**
-     * Юзерово значение menuBackgroundBlurriness, пока Aurora владеет опцией
-     * в fallback-режиме (шейдеры/Fabulous): хранится в aurora.json, а не в
-     * статике — иначе при краше юзерово значение навсегда уезжает в
-     * options.txt. -1 — владения нет.
-     */
-    private static int vanillaBlurBackup = -1;
-
-    public static String getNickname() {
-        return nickname;
-    }
-
-    /** Запоминает и применяет никнейм. */
-    public static void setNickname(String nick) {
-        nickname = (nick == null || nick.isBlank()) ? null : nick.trim();
-        if (nickname != null) {
-            ProfileManager.apply(nickname);
-        } else {
-            // сброс невозможен без перезапуска — просто запоминаем
-            ProfileManager.setPending(null);
-        }
-        save();
-    }
-
     public static synchronized void save() {
         dirty = false;
         dirtyTicks = 0;
         try {
             JsonObject root = new JsonObject();
-            // v2: доли экрана + якоря (v1 — только доли, без якорей)
-            root.addProperty("ver", 2);
             root.add("theme", AuroraClient.theme().save());
-            if (nickname != null) {
-                root.addProperty("nickname", nickname);
-            }
-            if (vanillaBlurBackup != -1) {
-                root.addProperty("blurVanillaBackup", vanillaBlurBackup);
-            }
+            root.addProperty("nickname", nickname);
 
             JsonArray modules = new JsonArray();
             for (Module m : ModuleManager.all()) {
@@ -115,10 +76,10 @@ public final class AuroraConfig {
                 if (m instanceof HudModule hud) {
                     mo.addProperty("x", hud.x);
                     mo.addProperty("y", hud.y);
-                    mo.addProperty("anchorX", hud.anchorX);
-                    mo.addProperty("anchorY", hud.anchorY);
                     mo.addProperty("scale", hud.scale.get());
                     mo.addProperty("bg", hud.background.get());
+                    mo.addProperty("ax", hud.anchorX);
+                    mo.addProperty("ay", hud.anchorY);
                 }
                 JsonObject settings = new JsonObject();
                 for (Setting s : m.settings()) {
@@ -156,18 +117,13 @@ public final class AuroraConfig {
                 firstRunDefaults();
                 return;
             }
-            pendingMigrationLog = !root.has("ver"); // конфиг формата 1.2.x — миграция v1→v2
-            if (root.has("blurVanillaBackup")) {
-                vanillaBlurBackup = Math.max(-1, root.get("blurVanillaBackup").getAsInt());
-            }
             if (root.has("theme")) {
                 AuroraClient.theme().load(root.getAsJsonObject("theme"));
             }
             if (root.has("nickname")) {
-                String nick = root.get("nickname").getAsString();
-                if (nick != null && !nick.isBlank()) {
-                    nickname = nick.trim();
-                    ProfileManager.setPending(nickname);
+                nickname = root.get("nickname").getAsString();
+                if (dev.aurora.client.profile.ProfileManager.isValid(nickname)) {
+                    dev.aurora.client.profile.ProfileManager.setPending(nickname);
                 }
             }
             if (root.has("modules")) {
@@ -187,17 +143,19 @@ public final class AuroraConfig {
                         if (mo.has("y")) {
                             hud.y = mo.get("y").getAsFloat();
                         }
-                        if (mo.has("anchorX")) {
-                            hud.anchorX = Math.max(0, Math.min(2, mo.get("anchorX").getAsInt()));
-                        }
-                        if (mo.has("anchorY")) {
-                            hud.anchorY = Math.max(0, Math.min(2, mo.get("anchorY").getAsInt()));
-                        }
                         if (mo.has("scale")) {
                             hud.scale.set(mo.get("scale").getAsFloat());
                         }
                         if (mo.has("bg")) {
                             hud.background.set(mo.get("bg").getAsBoolean());
+                        }
+                        // якоря должны персиститься: без них элемент после
+                        // перезапуска «прыгал» к другому краю экрана (баг 1.0.5)
+                        if (mo.has("ax")) {
+                            hud.anchorX = Math.max(0, Math.min(2, mo.get("ax").getAsInt()));
+                        }
+                        if (mo.has("ay")) {
+                            hud.anchorY = Math.max(0, Math.min(2, mo.get("ay").getAsInt()));
                         }
                     }
                     if (mo.has("settings")) {
@@ -235,98 +193,6 @@ public final class AuroraConfig {
             e.printStackTrace();
             firstRunDefaults();
         }
-    }
-
-    /**
-     * Прижимает все HUD-элементы к границам экрана. Вызывается каждый тик,
-     * но работает один раз — когда окно гарантированно готово. Заодно
-     * логирует миграцию конфига v1→v2, если она была.
-     */
-    public static void clampAllHud() {
-        if (hudClamped) {
-            return;
-        }
-        try {
-            var win = Minecraft.getInstance().getWindow();
-            if (win == null || win.getGuiScaledWidth() <= 0) {
-                return; // окно ещё не готово — попробуем на следующем тике
-            }
-            hudClamped = true;
-            // если прошлый запуск завершился крашем в fallback-режиме —
-            // возвращаем юзерово значение ванильной опции (бэкап был в aurora.json)
-            if (vanillaBlurBackup != -1) {
-                releaseVanillaBlurControl();
-            }
-            int gw = win.getGuiScaledWidth();
-            int gh = win.getGuiScaledHeight();
-            boolean changed = false;
-            for (Module m : ModuleManager.all()) {
-                if (m instanceof HudModule hud && hud.clampToScreen(gw, gh)) {
-                    changed = true;
-                }
-            }
-            if (changed) {
-                save();
-            }
-            if (pendingMigrationLog) {
-                pendingMigrationLog = false;
-                org.slf4j.LoggerFactory.getLogger("Aurora/Config").info(
-                        "Конфиг v1 перенесён в v2: позиции — доли экрана (guiScale на них не влияет), "
-                                + "элементы прижаты к границам. Если что-то съехало — поправьте один раз в HUD-редакторе.");
-            }
-        } catch (Exception ignored) {
-        }
-    }
-
-    /** Юзерово значение ванильной опции блюра, если сейчас владеем ею (-1 — нет). */
-    public static int getVanillaBlurBackup() {
-        return vanillaBlurBackup;
-    }
-
-    /**
-     * Aurora забирает управление ванильной опцией блюра (fallback-режим):
-     * юзерово значение запоминается в aurora.json один раз. Повторные вызовы
-     * не перечитывают опцию — иначе поверх старого бэкапа записался бы
-     * уже подменённый значение.
-     */
-    public static void takeVanillaBlurControl() {
-        if (vanillaBlurBackup != -1) {
-            return;
-        }
-        try {
-            vanillaBlurBackup = Minecraft.getInstance().options.getMenuBackgroundBlurriness();
-            save();
-        } catch (Exception ignored) {
-        }
-    }
-
-    /**
-     * Маппинг слайдера темы на ванильную опцию. Правило порога: 0 =
-     * выключено, иначе минимум 1 (порог ванили ровно 1.0) — тумблер не
-     * может быть «включён и не работать».
-     */
-    public static void applyVanillaBlur(int strength) {
-        try {
-            var opt = Minecraft.getInstance().options.menuBackgroundBlurriness();
-            int v = strength <= 0 ? 0 : Math.max(1, strength);
-            if (opt.get() != v) {
-                opt.set(v);
-            }
-        } catch (Exception ignored) {
-        }
-    }
-
-    /** Возвращаем юзерово значение и прекращаем владение. */
-    public static void releaseVanillaBlurControl() {
-        if (vanillaBlurBackup == -1) {
-            return;
-        }
-        try {
-            Minecraft.getInstance().options.menuBackgroundBlurriness().set(vanillaBlurBackup);
-        } catch (Exception ignored) {
-        }
-        vanillaBlurBackup = -1;
-        save();
     }
 
     /** Приятные значения по умолчанию при первом запуске. */
