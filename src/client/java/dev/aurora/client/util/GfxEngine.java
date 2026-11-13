@@ -200,6 +200,10 @@ public final class GfxEngine {
         float[] pts;
         int ptCount;
         boolean closed;
+        // точное отсечение (текст и прочие не-прямоугольные примитивы):
+        // scissor-область, переведённая в ЛОКАЛЬНЫЕ координаты команды
+        float lsx, lsy, lsw, lsh;
+        boolean useScissor;
 
         void scissor(float[] s) {
             if (s == null) {
@@ -226,6 +230,7 @@ public final class GfxEngine {
         c.text = null;
         c.ptCount = 0;
         c.closed = false;
+        c.useScissor = false;
         float[] s = currentScissor();
         if (s != null) {
             // scissor задаётся в gui-координатах — применяем текущую позу
@@ -855,11 +860,15 @@ public final class GfxEngine {
     /**
      * Ручное отсечение команды областью scissor (в глобальных координатах).
      *
-     * <p>nvgIntersectScissor в связке с devicePixelRatio &gt; 1 отсекает
-     * валидные области (примитивы «пропадали» целыми рядами), поэтому
-     * отсечение считается вручную: прямоугольные примитивы без вращения
-     * позы клэмпятся точно; остальные проверяются по габариту — полностью
-     * вне области отбрасываются, частично пересекающиеся рисуются целиком.</p>
+     * <p>Прямоугольные примитивы без вращения позы клэмпятся точно по
+     * геометрии. Остальные (текст, круги, тени, пути) — проверяются по
+     * габариту: полностью вне области отбрасываются, а частично
+     * пересекающиеся получают локальную scissor-область — в replay она
+     * применяется через nvgScissor, и примитив обрезается пиксельно.</p>
+     *
+     * <p>Раньше частично пересекающийся текст рисовался целиком — строки
+     * настроек «вылезали» за нижнюю границу карточки и ложились на футер
+     * меню (баг 1.0.6, пойман на скриншоте смоук-теста).</p>
      *
      * @return false — команда полностью вне области
      */
@@ -912,7 +921,37 @@ public final class GfxEngine {
             ay0 = loy;
             ay1 = hiy;
         }
-        return ax1 > c.sx && ax0 < sx1 && ay1 > c.sy && ay0 < sy1;
+        if (!(ax1 > c.sx && ax0 < sx1 && ay1 > c.sy && ay0 < sy1)) {
+            return false;
+        }
+        // частичное пересечение: считаем scissor-область в локальных
+        // координатах команды (обратная поза) — replay применит nvgScissor
+        float det = p.m00() * p.m11() - p.m01() * p.m10();
+        if (Math.abs(det) < 1e-8f) {
+            return true; // вырожденная поза — рисуем как есть (габарит проверен)
+        }
+        float i00 = p.m11() / det, i01 = -p.m01() / det;
+        float i10 = -p.m10() / det, i11 = p.m00() / det;
+        float lx0 = Float.MAX_VALUE, ly0 = Float.MAX_VALUE;
+        float lx1 = -Float.MAX_VALUE, ly1 = -Float.MAX_VALUE;
+        for (int corner = 0; corner < 4; corner++) {
+            float gx = (corner & 1) == 0 ? c.sx : sx1;
+            float gy = (corner & 2) == 0 ? c.sy : sy1;
+            float dx = gx - p.m20();
+            float dy = gy - p.m21();
+            float lx = i00 * dx + i01 * dy;
+            float ly = i10 * dx + i11 * dy;
+            lx0 = Math.min(lx0, lx);
+            lx1 = Math.max(lx1, lx);
+            ly0 = Math.min(ly0, ly);
+            ly1 = Math.max(ly1, ly);
+        }
+        c.lsx = lx0;
+        c.lsy = ly0;
+        c.lsw = lx1 - lx0;
+        c.lsh = ly1 - ly0;
+        c.useScissor = c.lsw > 0.05f && c.lsh > 0.05f;
+        return true;
     }
 
     private static void replay(Cmd c) {
@@ -929,6 +968,11 @@ public final class GfxEngine {
         NanoVG.nvgSave(ctx);
         try {
             NanoVG.nvgTransform(ctx, p.m00(), p.m01(), p.m10(), p.m11(), p.m20(), p.m21());
+            if (c.useScissor) {
+                // локальная scissor-область: NanoVG сам применит к ней
+                // текущий transform (и devicePixelRatio) — обрезка точная
+                NanoVG.nvgScissor(ctx, c.lsx, c.lsy, c.lsw, c.lsh);
+            }
             switch (c.type) {
                 case FILL -> fillRounded(c.x, c.y, c.w, c.h, c.r, c.argb);
                 case CIRCLE -> {

@@ -4,6 +4,7 @@ import dev.aurora.client.hud.HudEditorScreen;
 import dev.aurora.client.module.Category;
 import dev.aurora.client.module.Module;
 import dev.aurora.client.module.settings.BooleanSetting;
+import dev.aurora.client.module.settings.ColorSetting;
 import dev.aurora.client.module.settings.ModeSetting;
 import dev.aurora.client.module.settings.NumberSetting;
 import dev.aurora.client.theme.Theme;
@@ -34,12 +35,18 @@ import java.util.Map;
  * (ванильный {@link GameRenderer#projectPointToScreen(Vec3)} с учётом FOV
  * и зума Aurora), поверх прямоугольника цели NanoVG рисует стиль.
  *
- * <p>Стиль «Призрак» — фирменный анимированный набор (по референсу):
- * квадрат-подложка, два вращающихся ромба навстречу друг другу, кольцо,
- * летящее вверх-вниз вдоль тела цели, светящийся диск под ногами и три
- * «призрака», кружащих вокруг противника с покачиванием и мерцанием.
- * Все углы — от абсолютного времени {@link FrameClock}, поэтому движение
- * идеально плавное и не зависит от тиков.</p>
+ * <p>Стиль «Круг» (по умолчанию) — фирменная подсветка: моб находится
+ * внутри светящегося круга, круг плавно «дышит» вверх-вниз по синусоиде
+ * (амплитуда подобрана так, что цель всегда остаётся внутри), свечение
+ * размыто несколькими слоями колец и радиальным пятном. Внутри летают
+ * две дуги-«кометы» навстречу друг другу, у ног цели — светящееся
+ * кольцо-якорь в мировой проекции.</p>
+ *
+ * <p>Стиль «Призрак» — квадрат-подложка, два вращающихся ромба навстречу
+ * друг другу, кольцо вдоль тела цели, светящийся диск под ногами и три
+ * «призрака», кружащих вокруг противника. Все углы — от абсолютного
+ * времени {@link FrameClock}: движение идеально плавное и не зависит
+ * от тиков.</p>
  */
 public class TargetEspModule extends Module {
     /** Максимум целей в режиме «Ближайшие». */
@@ -47,21 +54,31 @@ public class TargetEspModule extends Module {
     /** Отладка подбора целей (AURORA_ESP_DEBUG=1). */
     private static final boolean DEBUG = System.getenv("AURORA_ESP_DEBUG") != null;
     private long lastDebugLog;
+    private long lastBboxLog;
 
     public final ModeSetting mode = new ModeSetting("Режим",
             new String[]{"Под прицелом", "Ближайшие"}, 0, "Кого подсвечивать");
     public final NumberSetting range = new NumberSetting("Дальность", 8.0f, 3.0f, 32.0f, 1.0f, 0,
             "Радиус поиска целей в блоках");
     public final ModeSetting style = new ModeSetting("Стиль",
-            new String[]{"Призрак", "Рамка", "Уголки", "Свечение"}, 0, "Как рисовать подсветку");
+            new String[]{"Круг", "Призрак", "Рамка", "Уголки", "Свечение"}, 0, "Как рисовать подсветку");
+    public final NumberSetting circleRadius = new NumberSetting("Радиус круга", 1.05f, 0.9f, 1.8f, 0.05f, 2,
+            "Насколько круг больше цели");
+    public final NumberSetting speed = new NumberSetting("Скорость", 1.0f, 0.2f, 3.0f, 0.1f, 1,
+            "Скорость полёта круга и дуг");
+    public final BooleanSetting glow = new BooleanSetting("Свечение", true,
+            "Мягкое размытое свечение вокруг круга");
+    public final BooleanSetting customColor = new BooleanSetting("Свой цвет", false,
+            "Использовать свой цвет вместо акцента темы");
+    public final ColorSetting color = new ColorSetting("Цвет", 0xFF8B5CF6, "Цвет подсветки в стиле «Круг»");
     public final BooleanSetting playersOnly = new BooleanSetting("Только игроки", true,
             "В режиме «Ближайшие» показывать лишь игроков");
     public final BooleanSetting health = new BooleanSetting("Здоровье", true,
             "Полоска здоровья под рамкой");
 
     public TargetEspModule() {
-        super("Target ESP", "Подсветка цели: призраки, ромб, кольцо, рамка, уголки", Category.VISUAL);
-        addSettings(mode, range, style, playersOnly, health);
+        super("Target ESP", "Подсветка цели: круг с дугами, призраки, рамка, уголки", Category.VISUAL);
+        addSettings(mode, range, style, circleRadius, speed, glow, customColor, color, playersOnly, health);
     }
 
     /** Состояние одной цели: альфа появления и сглаженное здоровье. */
@@ -83,6 +100,8 @@ public class TargetEspModule extends Module {
     private final float[] diamond = new float[8];
     private final float[] diamond2 = new float[8];
     private final float[] ghostPts = new float[GHOST.length];
+    /** Буфер дуг стиля «Круг» (до 34 точек). */
+    private final float[] arcPts = new float[68];
     private float projX, projY;
     private Vec3 camPos;
     private float guiW, guiH;
@@ -143,6 +162,21 @@ public class TargetEspModule extends Module {
             lastDebugLog = FrameClock.now();
             org.slf4j.LoggerFactory.getLogger("Aurora/Test")
                     .info("AURORA_ESP_DEBUG: целей={}", list.size());
+            if (!list.isEmpty()) {
+                Entity e0 = list.get(0);
+                org.slf4j.LoggerFactory.getLogger("Aurora/Test").info(
+                        "AURORA_ESP_DEBUG: цель#0={} pos=({},{},{}) cam=({},{},{}) rot=({},{},{},{}) gui={}x{}",
+                        e0.getName().getString(),
+                        String.format("%.1f", e0.getX()), String.format("%.1f", e0.getY()),
+                        String.format("%.1f", e0.getZ()),
+                        String.format("%.1f", camPos.x), String.format("%.1f", camPos.y),
+                        String.format("%.1f", camPos.z),
+                        String.format("%.2f", mc.gameRenderer.getMainCamera().rotation().x),
+                        String.format("%.2f", mc.gameRenderer.getMainCamera().rotation().y),
+                        String.format("%.2f", mc.gameRenderer.getMainCamera().rotation().z),
+                        String.format("%.2f", mc.gameRenderer.getMainCamera().rotation().w),
+                        (int) guiW, (int) guiH);
+            }
         }
     }
 
@@ -240,6 +274,12 @@ public class TargetEspModule extends Module {
         int y0 = Math.round(minY) - pad;
         int x1 = Math.round(maxX) + pad;
         int y1 = Math.round(maxY) + pad;
+        if (DEBUG && FrameClock.now() - lastBboxLog > 2000) {
+            lastBboxLog = FrameClock.now();
+            org.slf4j.LoggerFactory.getLogger("Aurora/Test").info(
+                    "AURORA_ESP_BBOX: {} corners={} bbox=({},{})-({},{})",
+                    e.getName().getString(), frontCorners, x0, y0, x1, y1);
+        }
         int bw = x1 - x0;
         int bh = y1 - y0;
         if (bw < 4 || bh < 6) {
@@ -259,6 +299,7 @@ public class TargetEspModule extends Module {
         int accent2 = theme.accent(1.0f);
 
         switch (style.get()) {
+            case "Круг" -> drawCircleStyle(g, e, bb, x0, y0, bw, bh, accent, accent2, A, tSec, gr);
             case "Уголки" -> drawCorners(g, x0, y0, bw, bh, accent, A);
             case "Свечение" -> drawGlow(g, x0, y0, bw, bh, accent, accent2, A);
             case "Рамка" -> drawFrame(g, x0, y0, bw, bh, accent, A);
@@ -267,6 +308,94 @@ public class TargetEspModule extends Module {
         if (health.get() && e instanceof LivingEntity le) {
             drawHealth(g, st, le, x0, y0, bw, y1, accent, A);
         }
+    }
+
+    /* ------------------------------------------------------------------ */
+    /*  Стиль «Круг»: светящийся круг вокруг цели, плавно летящий          */
+    /*  вверх-вниз, с размытым свечением и дугами-«кометами»              */
+    /* ------------------------------------------------------------------ */
+
+    private void drawCircleStyle(GuiGraphics g, Entity e, AABB bb, int x, int y, int w, int h,
+                                 int accent, int accent2, int A, float t, GameRenderer gr) {
+        float k = A / 255f;
+        int col = customColor.get() ? color.get() : accent;
+        int col2 = customColor.get()
+                ? ColorUtil.lerp(color.get(), ColorUtil.rgb(255, 255, 255), 0.30f)
+                : accent2;
+        float spd = Math.max(0.1f, speed.get());
+
+        float cx = x + w / 2f;
+        float cy = y + h / 2f;
+        float halfDiag = (float) Math.sqrt(w * (float) w + h * (float) h) * 0.5f;
+
+        // амплитуда полёта круга: заметная, но цель всегда внутри круга
+        float amp = Math.max(2f, h * 0.15f);
+        float R = Math.max(halfDiag * circleRadius.get(), h * 0.5f + amp + 3f);
+        // кэп: у самой близкой цели круг не должен разрастаться на пол-экрана
+        // и перекрывать HUD-панели (замечено на скриншоте смоук-теста)
+        R = Math.min(R, guiH * 0.42f);
+        // плавный полёт вверх-вниз (чистый синус от абсолютного времени)
+        float bob = (float) Math.sin(t * 1.7f * spd) * amp;
+        float rcy = cy + bob;
+        // лёгкое «дыхание» радиуса — круг живой
+        float breathe = 1f + 0.03f * (float) Math.sin(t * 2.3f * spd);
+        R *= breathe;
+
+        // ===== размытое свечение: радиальное пятно + широкие мягкие кольца =====
+        if (glow.get()) {
+            GfxEngine.radial(g, cx, rcy, R * 2.8f, ColorUtil.alpha(col, (int) (44 * k)), ColorUtil.alpha(col, 0));
+            GfxEngine.ring(g, cx, rcy, (R + 6.5f) * 2, ColorUtil.alpha(col, (int) (32 * k)), 3.4f);
+            GfxEngine.ring(g, cx, rcy, (R + 3.2f) * 2, ColorUtil.alpha(col, (int) (58 * k)), 2.2f);
+        }
+
+        // ===== основной круг: «размытый» гауссов ореол — несколько всё более
+        // широких и всё более тусклых штрихов вместо одного резкого контура =====
+        GfxEngine.ring(g, cx, rcy, R * 2, ColorUtil.alpha(col, (int) (48 * k)), 7.5f);
+        GfxEngine.ring(g, cx, rcy, R * 2, ColorUtil.alpha(col, (int) (95 * k)), 4.4f);
+        GfxEngine.ring(g, cx, rcy, R * 2, ColorUtil.alpha(col, (int) (205 * k)), 2.4f);
+        // тонкое внутреннее колечко вторым цветом — глубина
+        GfxEngine.ring(g, cx, rcy, (R - 3.2f) * 2, ColorUtil.alpha(col2, (int) (100 * k)), 0.9f);
+
+        // ===== две дуги-«кометы», летящие по кругу навстречу друг другу =====
+        float arcR = Math.max(6f, R - 4.5f);
+        float headA = t * 1.9f * spd;
+        float tailA = headA - 2.2f; // ~126°
+        drawArc(g, cx, rcy, arcR, headA, tailA, ColorUtil.alpha(col, (int) (205 * k)), 1.9f);
+        float headB = -t * 1.35f * spd + 2.4f;
+        float tailB = headB - 1.45f;
+        drawArc(g, cx, rcy, arcR * 0.99f, headB, tailB, ColorUtil.alpha(col2, (int) (150 * k)), 1.2f);
+        // светящиеся «головки» комет
+        GfxEngine.circle(g, cx + (float) Math.cos(headA) * arcR, rcy + (float) Math.sin(headA) * arcR,
+                3.6f, ColorUtil.alpha(col, (int) (220 * k)));
+        GfxEngine.circle(g, cx + (float) Math.cos(headA) * arcR, rcy + (float) Math.sin(headA) * arcR,
+                1.7f, ColorUtil.rgba(255, 255, 255, (int) (215 * k)));
+        GfxEngine.circle(g, cx + (float) Math.cos(headB) * arcR, rcy + (float) Math.sin(headB) * arcR,
+                2.4f, ColorUtil.alpha(col2, (int) (185 * k)));
+
+        // ===== кольцо-якорь у ног цели (мировая проекция) =====
+        if (project(gr, e.getX(), bb.minY + 0.03, e.getZ())) {
+            float rx = Math.max(7f, w * 0.40f);
+            float ry = rx * 0.30f;
+            GfxEngine.ellipse(g, projX, projY, rx * 1.4f, ry * 1.4f, ColorUtil.alpha(col, (int) (40 * k)), 2.6f);
+            GfxEngine.ellipse(g, projX, projY, rx, ry, ColorUtil.alpha(col, (int) (150 * k)), 1.1f);
+        }
+    }
+
+    /**
+     * Дуга по окружности (по часовой при sweep &lt; 0). Точки пишутся в буфер
+     * {@code arcPts} — без аллокаций.
+     */
+    private void drawArc(GuiGraphics g, float cx, float cy, float r, float headA, float tailA,
+                         int argb, float thickness) {
+        float sweep = tailA - headA;
+        int n = Math.min(arcPts.length / 2, Math.max(6, (int) (Math.abs(sweep) / 0.22f) + 2));
+        for (int i = 0; i < n; i++) {
+            float f = i / (float) (n - 1);
+            float a = headA + sweep * f;
+            arcPts[i * 2] = cx + (float) Math.cos(a) * r;
+            arcPts[i * 2 + 1] = cy + (float) Math.sin(a) * r;
+        }
+        GfxEngine.pathStroke(g, arcPts, n, argb, thickness, false);
     }
 
     /* ------------------------------------------------------------------ */

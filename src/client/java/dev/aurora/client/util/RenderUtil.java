@@ -405,4 +405,20 @@ public final class RenderUtil {
         List<String> lines = wrapLimited(font, s, maxWidth, theme, 1);
         return lines.isEmpty() ? s : lines.get(0);
     }
+
+    /** Обрезает строку произвольного размера под ширину (для заголовков). */
+    public static String ellipsizeSize(String s, float size, boolean bold, int maxWidth) {
+        if (s == null || s.isEmpty() || widthSize(s, size, bold) <= maxWidth) {
+            return s;
+        }
+        String result = s.substring(0, 1) + "...";
+        for (int i = 1; i < s.length(); i++) {
+            String candidate = s.substring(0, i + 1) + "...";
+            if (widthSize(candidate, size, bold) > maxWidth) {
+                return result; // предыдущий вариант помещался
+            }
+            result = candidate;
+        }
+        return result;
+    }
 }

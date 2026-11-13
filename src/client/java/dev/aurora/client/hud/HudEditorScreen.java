@@ -39,6 +39,9 @@ public class HudEditorScreen extends Screen {
     private long lastFrameNanos = System.nanoTime();
     /** Целевой масштаб при прокрутке колесом (элемент плавно его достигает). */
     private final Map<HudModule, Float> scaleTargets = new HashMap<>();
+    /** Снап-направляющие: линии сетки, к которым привязан перетаскиваемый элемент. */
+    private int snapGuideX = Integer.MIN_VALUE;
+    private int snapGuideY = Integer.MIN_VALUE;
 
     /** Кнопка «Сбросить позиции» [x, y, w, h]. */
     private int[] resetBtn;
@@ -103,6 +106,10 @@ public class HudEditorScreen extends Screen {
                     tlPx = Math.round(tlPx / 5f) * 5;
                     tlPy = Math.round(tlPy / 5f) * 5;
                 }
+                // запоминаем для снап-направляющих (рисуются на след. кадре —
+                // задержка в один кадр при плавном драге незаметна)
+                snapGuideX = tlPx;
+                snapGuideY = tlPy;
                 float tx = Math.max(0f, Math.min(1f, hud.fractionForTL(tlPx, g.guiWidth())));
                 float ty = Math.max(0f, Math.min(1f, hud.fractionForTL_Y(tlPy, g.guiHeight())));
                 float k = 1f - (float) Math.exp(-16f * dt);
@@ -144,8 +151,9 @@ public class HudEditorScreen extends Screen {
     }
 
     /* ------------------------------------------------------------------ */
-    /*  Сетка редактора: мелкая линия + акцентные мажорные линии +        */
-    /*  перекрестие курсора — как в современных HUD-редакторах            */
+    /*  Сетка редактора «как в современных визуалах»: едва заметные       */
+    /*  минорные линии + мажорные, центральные оси, снап-направляющие     */
+    /*  при драге, перекрестие курсора со свечением и уголки-видоискатель */
     /* ------------------------------------------------------------------ */
 
     /** Смоук-тест полигонов: AURORA_PTS_DEBUG=1. */
@@ -176,19 +184,59 @@ public class HudEditorScreen extends Screen {
         }
         int w = this.width;
         int h = this.height;
-        int minor = ColorUtil.rgba(255, 255, 255, (int) (13 * at));
-        int major = ColorUtil.alpha(theme.accentNow(), (int) (26 * at));
+        int accent = theme.accentNow();
+
+        // ===== тонкая сетка: минорные линии почти невидимы, мажорные чуть заметнее =====
+        int minor = ColorUtil.rgba(255, 255, 255, (int) (10 * at));
+        int major = ColorUtil.alpha(accent, (int) (26 * at));
         for (int x = 0, i = 0; x <= w; x += GRID_CELL, i++) {
             GfxEngine.rounded(g, x, 0, 1, h, 0, i % GRID_MAJOR == 0 ? major : minor);
         }
         for (int y = 0, i = 0; y <= h; y += GRID_CELL, i++) {
             GfxEngine.rounded(g, 0, y, w, 1, 0, i % GRID_MAJOR == 0 ? major : minor);
         }
-        // перекрестие под курсором — акцентное, с мягким пятном
-        int cross = ColorUtil.alpha(theme.accentNow(), (int) (60 * at));
+
+        // ===== центральные оси — акцентные, как в графических редакторах =====
+        int axis = ColorUtil.alpha(accent, (int) (48 * at));
+        GfxEngine.rounded(g, w / 2f, 0, 1, h, 0, axis);
+        GfxEngine.rounded(g, 0, h / 2f, w, 1, 0, axis);
+
+        // ===== снап-направляющие: подсвечиваем линии сетки, к которым привязан элемент =====
+        if (dragging != null) {
+            int guide = ColorUtil.alpha(accent, (int) (95 * at));
+            if (snapGuideX != Integer.MIN_VALUE) {
+                GfxEngine.rounded(g, snapGuideX, 0, 1, h, 0, guide);
+            }
+            if (snapGuideY != Integer.MIN_VALUE) {
+                GfxEngine.rounded(g, 0, snapGuideY, w, 1, 0, guide);
+            }
+        }
+
+        // ===== перекрестие под курсором: акцентные линии + мягкое свечение =====
+        int cross = ColorUtil.alpha(accent, (int) (64 * at));
         GfxEngine.rounded(g, mouseX, 0, 1, h, 0, cross);
         GfxEngine.rounded(g, 0, mouseY, w, 1, 0, cross);
-        GfxEngine.circle(g, mouseX, mouseY, 10, ColorUtil.alpha(theme.accentNow(), (int) (26 * at)));
+        GfxEngine.radial(g, mouseX, mouseY, 46, ColorUtil.alpha(accent, (int) (24 * at)),
+                ColorUtil.alpha(accent, 0));
+        GfxEngine.circle(g, mouseX, mouseY, 3, ColorUtil.alpha(accent, (int) (150 * at)));
+
+        // ===== уголки-«видоискатель» по краям экрана =====
+        int bl = ColorUtil.alpha(accent, (int) (115 * at));
+        float len = 16;
+        float th = 2;
+        float m = 7;
+        // левый верхний
+        GfxEngine.rounded(g, m, m, len, th, 1, bl);
+        GfxEngine.rounded(g, m, m, th, len, 1, bl);
+        // правый верхний
+        GfxEngine.rounded(g, w - m - len, m, len, th, 1, bl);
+        GfxEngine.rounded(g, w - m - th, m, th, len, 1, bl);
+        // левый нижний
+        GfxEngine.rounded(g, m, h - m - th, len, th, 1, bl);
+        GfxEngine.rounded(g, m, h - m - len, th, len, 1, bl);
+        // правый нижний
+        GfxEngine.rounded(g, w - m - len, h - m - th, len, th, 1, bl);
+        GfxEngine.rounded(g, w - m - th, h - m - len, th, len, 1, bl);
     }
 
     /* ------------------------------------------------------------------ */
@@ -324,7 +372,7 @@ public class HudEditorScreen extends Screen {
         if (hud instanceof CoordsHud) return 0.005f;
         if (hud instanceof CpsHud) return 0.005f;
         if (hud instanceof KeystrokesHud) return 0.006f;
-        if (hud instanceof DirectionHud) return 0.99f;
+        if (hud instanceof DirectionHud) return 0.955f;
         if (hud instanceof ClockHud) return 0.5f;
         return hud.x;
     }
@@ -336,7 +384,7 @@ public class HudEditorScreen extends Screen {
         if (hud instanceof CoordsHud) return 0.225f;
         if (hud instanceof CpsHud) return 0.300f;
         if (hud instanceof KeystrokesHud) return 0.55f;
-        if (hud instanceof DirectionHud) return 0.005f;
+        if (hud instanceof DirectionHud) return 0.008f;
         if (hud instanceof ClockHud) return 0.005f;
         return hud.y;
     }
@@ -391,6 +439,8 @@ public class HudEditorScreen extends Screen {
             AuroraConfig.markDirty();
         }
         dragging = null;
+        snapGuideX = Integer.MIN_VALUE;
+        snapGuideY = Integer.MIN_VALUE;
         return super.mouseReleased(e);
     }
 
@@ -452,8 +502,9 @@ public class HudEditorScreen extends Screen {
             // с полями -3/-1 от точки перевода; проверяем именно его
             boolean ok = px - 3 >= 0 && py - 1 >= 0
                     && px - 3 + bb[2] <= this.width && py - 1 + bb[3] <= this.height;
-            LOGGER.info("AURORA_HUD_BBOX [{}]: {} px=({},{}), размер={}x{}, экран={}x{}, вЭкране={}",
-                    phase, hud.name, px, py, bb[2], bb[3], this.width, this.height, ok);
+            LOGGER.info("AURORA_HUD_BBOX [{}]: {} px=({},{}), размер={}x{}, экран={}x{}, вЭкране={}, x={}, ax={}, w={}",
+                    phase, hud.name, px, py, bb[2], bb[3], this.width, this.height, ok,
+                    String.format("%.3f", hud.x), hud.anchorX, hud.width());
         }
     }
 

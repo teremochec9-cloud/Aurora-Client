@@ -164,8 +164,10 @@ public abstract class HudModule extends Module {
         if (px - 3 < 0) {
             return 3;
         }
-        if (px - 3 + bw > guiWidth) {
-            return Math.max(3, guiWidth - bw + 3);
+        // 1px запас: обводка капсулы толщиной 1px на самой границе
+        // резалась краем экрана (замечено на скриншоте «Сторона света»)
+        if (px - 3 + bw > guiWidth - 1) {
+            return Math.max(3, guiWidth - bw + 2);
         }
         return px;
     }
@@ -177,7 +179,7 @@ public abstract class HudModule extends Module {
         if (py - 1 < 0) {
             return 1;
         }
-        if (py - 1 + bh > guiHeight) {
+        if (py - 1 + bh > guiHeight - 1) {
             return Math.max(1, guiHeight - bh + 1);
         }
         return py;

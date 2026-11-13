@@ -9,11 +9,13 @@ import dev.aurora.client.hud.HudModule;
 import dev.aurora.client.module.Category;
 import dev.aurora.client.module.Module;
 import dev.aurora.client.module.ModuleManager;
+import dev.aurora.client.module.modules.ChatModule;
 import dev.aurora.client.module.modules.CleanHudModule;
 import dev.aurora.client.module.modules.CustomCrosshairModule;
 import dev.aurora.client.module.modules.TargetEspModule;
 import dev.aurora.client.theme.Theme;
 import dev.aurora.client.util.ColorUtil;
+import dev.aurora.client.util.GfxEngine;
 import dev.aurora.client.util.RenderUtil;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
@@ -25,9 +27,18 @@ import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.Screenshot;
 import net.minecraft.client.gui.GuiGraphics;
+import net.minecraft.client.gui.screens.ChatScreen;
 import net.minecraft.client.gui.screens.TitleScreen;
 import net.minecraft.resources.Identifier;
 import net.minecraft.util.Mth;
+import net.minecraft.world.Difficulty;
+import net.minecraft.world.flag.FeatureFlags;
+import net.minecraft.world.level.GameType;
+import net.minecraft.world.level.LevelSettings;
+import net.minecraft.world.level.WorldDataConfiguration;
+import net.minecraft.world.level.gamerules.GameRules;
+import net.minecraft.world.level.levelgen.WorldOptions;
+import net.minecraft.world.level.levelgen.presets.WorldPresets;
 
 /**
  * Aurora Client — точка входа.
@@ -45,11 +56,29 @@ public class AuroraClient implements ClientModInitializer {
     private static final boolean TEST_GUI = "1".equals(System.getenv("AURORA_TEST_GUI"));
     /** Смоук-тест: вместо ClickGUI открыть HUD-редактор (AURORA_TEST_HUD=1). */
     private static final boolean TEST_HUD = "1".equals(System.getenv("AURORA_TEST_HUD"));
-    /** Смоук-харнесс: автоскриншоты каждые 2 с в папку (AURORA_SHOT_DIR=/путь). */
+    /** Смоук-тест: автосоздание мира с мобами (AURORA_TEST_WORLD=1). */
+    private static final boolean TEST_WORLD = "1".equals(System.getenv("AURORA_TEST_WORLD"));
+    /** Смоук-тест: после загрузки мира открыть чат с «/» (AURORA_TEST_CHAT=1). */
+    private static final boolean TEST_CHAT = "1".equals(System.getenv("AURORA_TEST_CHAT"));
+    /** Смоук-харнесс: автоскриншоты в папку (AURORA_SHOT_DIR=/путь). */
     private static final String SHOT_DIR = System.getenv("AURORA_SHOT_DIR");
+    /** Смоук-харнесс: макс. число скриншотов (AURORA_SHOT_MAX, по умолчанию 40). */
+    private static final int SHOT_MAX = Integer.parseInt(System.getenv().getOrDefault("AURORA_SHOT_MAX", "40"));
+    /** Смоук-харнесс: интервал скриншотов в тиках (AURORA_SHOT_EVERY, по умолчанию 40). */
+    private static final int SHOT_EVERY = Integer.parseInt(System.getenv().getOrDefault("AURORA_SHOT_EVERY", "40"));
     private int titleTicks;
     private int shotCooldown = 60; // первый кадр — через 3 с после старта
     private int shotIndex;
+    /** Смоук: мир запрошен (один раз). */
+    private static boolean worldRequested;
+    /** Смоук: тики после захода в мир (−1 — ещё не в мире). */
+    private static int worldJoinTicks = -1;
+    /** Смоук: мобы призваны. */
+    private static boolean mobsSummoned;
+    /** Смоук: чат открыт. */
+    private static boolean chatOpened;
+    /** Контроль мерцания: предупреждение логируется один раз. */
+    private static boolean flickerLogged;
 
     public static Theme theme() {
         return THEME;
@@ -75,6 +104,9 @@ public class AuroraClient implements ClientModInitializer {
             if (!profileApplied) {
                 profileApplied = true;
                 dev.aurora.client.profile.ProfileManager.applyPending();
+                // чиним прозрачность чата, испорченную багом 1.0.5,
+                // ДО тика модулей (модуль чата мог уже «одолжить» опцию)
+                ChatModule.repairOnce(client);
             }
             ModuleManager.tick();
             AuroraConfig.tick();
@@ -103,6 +135,13 @@ public class AuroraClient implements ClientModInitializer {
                     markKeyHeld(m, key != 0 && InputConstants.isKeyDown(client.getWindow(), key));
                 }
             }
+            // контроль мерцания: ванильный TitleScreen не должен быть текущим
+            // ни на один тик (синхронная подмена). Если строчка появляется —
+            // ванильная заставка мелькает перед меню Aurora (логируем один раз)
+            if (client.screen instanceof TitleScreen && !flickerLogged) {
+                flickerLogged = true;
+                LOG.warn("СМОУК: ванильный TitleScreen стал текущим экраном — возможно мерцание!");
+            }
             // служебный режим смоук-теста: открыть ClickGUI или HUD-редактор
             if (TEST_GUI && client.screen instanceof AuroraTitleScreen) {
                 if (++titleTicks > 200) {
@@ -110,9 +149,72 @@ public class AuroraClient implements ClientModInitializer {
                     titleTicks = -1000000; // один раз
                 }
             }
+            // смоук-тест: автосоздание мира с мобами (AURORA_TEST_WORLD=1)
+            if (TEST_WORLD && !worldRequested
+                    && client.screen instanceof AuroraTitleScreen && ++titleTicks > 100) {
+                worldRequested = true;
+                titleTicks = -1000000; // не открывать меню после создания
+                try {
+                    client.createWorldOpenFlows().createFreshLevel("aurora_test",
+                            new LevelSettings("aurora_test", GameType.SURVIVAL, false, Difficulty.NORMAL,
+                                    true, new GameRules(FeatureFlags.VANILLA_SET), WorldDataConfiguration.DEFAULT),
+                            new WorldOptions(3250963L, true, false),
+                            WorldPresets::createNormalWorldDimensions, null);
+                    LOG.info("Смоук: создаём тестовый мир aurora_test (seed 3250963, чит-коды включены)");
+                } catch (Exception ex) {
+                    LOG.error("Смоук: не удалось создать тестовый мир", ex);
+                }
+            }
+            // смоук-тест: после загрузки мира — призвать мобов перед камерой,
+            // при AURORA_TEST_CHAT=1 открыть чат с «/» (проверка подсказок команд)
+            if (TEST_WORLD && client.level != null && client.player != null) {
+                if (worldJoinTicks < 0) {
+                    worldJoinTicks = 0;
+                    LOG.info("Смоук: мир загружен, игрок в мире");
+                }
+                worldJoinTicks++;
+                if (!mobsSummoned && worldJoinTicks == 40) {
+                    mobsSummoned = true;
+                    try {
+                        client.getConnection().sendCommand("summon minecraft:sheep ~ ~ ~5");
+                        client.getConnection().sendCommand("summon minecraft:pig ~2 ~ ~4");
+                        client.getConnection().sendCommand("summon minecraft:cow ~-2 ~ ~5");
+                        client.getConnection().sendCommand("time set day");
+                        LOG.info("Смоук: призваны овца, свинья и корова перед камерой");
+                    } catch (Exception ex) {
+                        LOG.error("Смоук: summon не удался", ex);
+                    }
+                }
+                if (TEST_CHAT && !chatOpened && worldJoinTicks == 160) {
+                    chatOpened = true;
+                    try {
+                        // пустой ввод: «печатание» ниже пройдёт полный путь ванильного
+                        // редактирования (респондент включает автоподсказки)
+                        client.setScreen(new ChatScreen("", false));
+                        LOG.info("Смоук: открыт чат — проверяем ввод и подсказки команд");
+                    } catch (Exception ex) {
+                        LOG.error("Смоук: чат не открылся", ex);
+                    }
+                }
+                // через секунду «печатаем» /gam: частичная команда даёт непустой
+                // список подсказок (для полностью введённого «/gamemode» бригадьер
+                // возвращает пустые подсказки — и дропдаун скрыт по семантике)
+                if (TEST_CHAT && chatOpened && worldJoinTicks == 180
+                        && client.screen instanceof ChatScreen chatScreen) {
+                    try {
+                        var field = ChatScreen.class.getDeclaredField("input");
+                        field.setAccessible(true);
+                        var box = (net.minecraft.client.gui.components.EditBox) field.get(chatScreen);
+                        box.insertText("/gam");
+                        LOG.info("Смоук: в чат напечатано «/gam» — ждём список подсказок");
+                    } catch (Exception ex) {
+                        LOG.error("Смоук: не удалось ввести текст в чат", ex);
+                    }
+                }
+            }
             // смоук-харнесс: периодические скриншоты для визуальной приёмки
             if (SHOT_DIR != null) {
-                if (++shotCooldown >= 40 && shotIndex < 40) {
+                if (++shotCooldown >= SHOT_EVERY && shotIndex < SHOT_MAX) {
                     shotCooldown = 0;
                     final int idx = shotIndex++;
                     final String screenName = client.screen == null ? "game"
@@ -134,13 +236,20 @@ public class AuroraClient implements ClientModInitializer {
         });
 
         // ===== Красивое главное меню =====
+        // ВАЖНО: экран подменяется СИНХРОННО, прямо внутри BEFORE_INIT.
+        // Раньше подмена откладывалась через client.execute — ванильный
+        // TitleScreen с панорамой успевал отрисоваться кадр-другой, и при
+        // каждом входе в меню неприятно «мелькала» ванильная заставка
+        // (баг 1.0.5). Вложенный setScreen безопасен: после init() внешний
+        // setScreen уже не перезаписывает this.screen.
         ScreenEvents.BEFORE_INIT.register((client, screen, scaledWidth, scaledHeight) -> {
             if (screen.getClass() == TitleScreen.class && !replacingTitle) {
                 replacingTitle = true;
-                client.execute(() -> {
+                try {
                     client.setScreen(new AuroraTitleScreen());
+                } finally {
                     replacingTitle = false;
-                });
+                }
             }
         });
 
@@ -217,34 +326,47 @@ public class AuroraClient implements ClientModInitializer {
         }
     }
 
-    /** Кастомный прицел: точка/круг/крест с настраиваемым размером. */
+    /**
+     * Кастомный прицел: векторная отрисовка (NanoVG) — гладкие точки,
+     * круги и линии любой толщины, с тёмной подложкой для читаемости
+     * на светлом фоне. «Динамика» мягко разводит крест при движении.
+     */
     private static void drawCustomCrosshair(GuiGraphics g, CustomCrosshairModule m) {
         int cx = g.guiWidth() / 2;
         int cy = g.guiHeight() / 2;
         int color = m.color.get();
         String style = m.style.get();
-        int size = Math.max(1, m.size.getInt());
+        float size = Math.max(1, m.size.get());
+        float th = Math.max(1f, m.thickness.get());
+        float spread = Math.max(0f, m.gap.get());
+        // динамика: крест плавно расходится от скорости движения
+        if (m.dynamic.get() && Minecraft.getInstance().player != null) {
+            double v = Minecraft.getInstance().player.getDeltaMovement().horizontalDistance();
+            spread += (float) Math.min(4.0, v * 2.4);
+        }
+        // тёмная подложка — прицел читается и на снегу, и в облаках
+        int shade = ColorUtil.rgba(5, 6, 10, 170);
+
         if (style.equals("Точка") || style.equals("Точка + круг")) {
-            g.fill(cx - size / 2, cy - size / 2, cx - size / 2 + Math.max(1, size),
-                    cy - size / 2 + Math.max(1, size), color);
+            GfxEngine.circle(g, cx, cy, size + 2.5f, shade);
+            GfxEngine.circle(g, cx, cy, size, color);
         }
         if (style.equals("Круг") || style.equals("Точка + круг")) {
-            int r = 4 + size;
-            int seg = 8 + r * 2;
-            for (int i = 0; i < seg; i++) {
-                double a = Math.PI * 2 * i / seg;
-                int px = cx + (int) Math.round(Math.cos(a) * r);
-                int py = cy + (int) Math.round(Math.sin(a) * r);
-                g.fill(px, py, px + 1, py + 1, color);
-            }
+            float r = 4 + size;
+            GfxEngine.ring(g, cx, cy, (r + th * 0.5f) * 2, shade, th + 1.6f);
+            GfxEngine.ring(g, cx, cy, r * 2, color, th);
         }
         if (style.equals("Крест")) {
-            int arm = 2 + size;
-            int gap = 2;
-            g.fill(cx - 1, cy - gap - arm, cx, cy - gap, color); // вверх
-            g.fill(cx, cy + gap, cx + 1, cy + gap + arm, color); // вниз
-            g.fill(cx - gap - arm, cy - 1, cx - gap, cy, color); // влево
-            g.fill(cx + gap, cy, cx + gap + arm, cy + 1, color); // вправо
+            float arm = 2 + size;
+            float half = th / 2f;
+            GfxEngine.rounded(g, cx - half - 0.8f, cy - spread - arm - 0.8f, th + 1.6f, arm + 1.6f, half, shade);
+            GfxEngine.rounded(g, cx - half - 0.8f, cy + spread - 0.8f, th + 1.6f, arm + 1.6f, half, shade);
+            GfxEngine.rounded(g, cx - spread - arm - 0.8f, cy - half - 0.8f, arm + 1.6f, th + 1.6f, half, shade);
+            GfxEngine.rounded(g, cx + spread - 0.8f, cy - half - 0.8f, arm + 1.6f, th + 1.6f, half, shade);
+            GfxEngine.rounded(g, cx - half, cy - spread - arm, th, arm, half, color);
+            GfxEngine.rounded(g, cx - half, cy + spread, th, arm, half, color);
+            GfxEngine.rounded(g, cx - spread - arm, cy - half, arm, th, half, color);
+            GfxEngine.rounded(g, cx + spread, cy - half, arm, th, half, color);
         }
     }
 

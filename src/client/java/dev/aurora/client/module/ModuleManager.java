@@ -6,7 +6,9 @@ import dev.aurora.client.module.modules.CustomCrosshairModule;
 import dev.aurora.client.module.modules.EntityShadowsModule;
 import dev.aurora.client.module.modules.FullbrightModule;
 import dev.aurora.client.module.modules.LowFireModule;
+import dev.aurora.client.module.modules.NoCloudsModule;
 import dev.aurora.client.module.modules.NoHurtCamModule;
+import dev.aurora.client.module.modules.NoWeatherModule;
 import dev.aurora.client.module.modules.OptimizeModule;
 import dev.aurora.client.module.modules.ParticleModule;
 import dev.aurora.client.module.modules.TargetEspModule;
@@ -42,6 +44,8 @@ public class ModuleManager {
         register(new OptimizeModule());
         register(new EntityShadowsModule());
         register(new ParticleModule());
+        register(new NoCloudsModule());
+        register(new NoWeatherModule());
         // HUD
         register(new WatermarkHud());
         register(new FpsHud());

@@ -55,13 +55,13 @@ public class AuroraClickGui extends Screen {
     private static final int WIN_W = 640;
     private static final int WIN_H = 360;
     private static final int WIN_R = 14;
-    private static final int SIDEBAR_W = 152;
+    private static final int SIDEBAR_W = 170;
     private static final int GAP = 8;
     private static final int CARD_R = 10;
     private static final int SEARCH_W = 168;
     /** Высота строки категории и шаг между ними. */
     private static final int CAT_H = 24;
-    private static final int CAT_STEP = 28;
+    private static final int CAT_STEP = 26;
 
     /** Дым за меню: x, y, r, speedY, swayAmp, swayFreq, phase, alpha — 5 медленных пятен. */
     private static final float[] MENU_SMOKE = {
@@ -185,6 +185,8 @@ public class AuroraClickGui extends Screen {
     private int maxScroll;
     /** Количество модулей в текущей вкладке — для чипа в шапке. */
     private int moduleCount;
+    /** Карточку нужно проскроллить в зону видимости (раскрытие настроек). */
+    private Module revealPending;
 
     public AuroraClickGui() {
         super(Component.literal("Aurora"));
@@ -200,6 +202,21 @@ public class AuroraClickGui extends Screen {
                 if (c.name().equalsIgnoreCase(tabEnv)) {
                     tab = c;
                 }
+            }
+        }
+        // смоук-харнесс: раскрыть карточку модуля (AURORA_TEST_EXPAND="Target ESP")
+        String expandEnv = System.getenv("AURORA_TEST_EXPAND");
+        if (expandEnv != null) {
+            Module m = ModuleManager.byName(expandEnv);
+            if (m != null) {
+                tab = m.category;
+                themeTab = false;
+                expanded.put(m, true);
+                expandAnims.computeIfAbsent(m, k -> new Animation(1, 14)).snap(1);
+                tabAnim.snap(1);
+                // при первом кадре разметки проскроллить список так, чтобы
+                // раскрытая карточка была видна целиком
+                revealPending = m;
             }
         }
         for (int i = 0; i < paletteHoverAnims.length; i++) {
@@ -459,6 +476,9 @@ public class AuroraClickGui extends Screen {
         drawSidebarText(g, winX, winY, t);
         drawHeaderText(g);
         drawBodyTexts(g);
+        // мягкое затухание списка рисуем ПОСЛЕ текста: иначе обрезанный
+        // текст оставался резким поверх дымки (замечено на скриншоте)
+        drawListFade(g);
         drawFooterTexts(g, winX, winY);
 
         if (theme.animations) {
@@ -510,7 +530,9 @@ public class AuroraClickGui extends Screen {
         int sx = winX + 10;
         int sy = winY + 10;
         int sw = SIDEBAR_W - 24;
-        int sh = WIN_H - 20;
+        // сайдбар заканчивается НАД футером: раньше его стекло залезало
+        // под подсказку «ЛКМ — вкл/выкл…» и под кнопки (замечено на скриншоте)
+        int sh = WIN_H - 20 - FOOTER_H + 6;
 
         GfxEngine.rounded(g, sx, sy, sw, sh, 12, ColorUtil.rgba(255, 255, 255, (int) (6 * t)));
         GfxEngine.outline(g, sx, sy, sw, sh, 12, ColorUtil.rgba(255, 255, 255, (int) (13 * t)), 1f);
@@ -560,7 +582,7 @@ public class AuroraClickGui extends Screen {
         }
 
         // ===== «Тема» =====
-        int themeY = cy + 4;
+        int themeY = cy + 2;
         boolean themeActive = themeTab;
         boolean themeHover = mouseX >= sx + 4 && mouseX < sx + sw - 4 && mouseY >= themeY && mouseY < themeY + CAT_H;
         themeRowHoverAnim.to(themeHover && !themeActive ? 1 : 0);
@@ -593,7 +615,7 @@ public class AuroraClickGui extends Screen {
         }));
 
         // ===== цветовая схема: аккуратные кружки с отступами (2 ряда по 6) =====
-        int palY = themeY + 36;
+        int palY = themeY + 42;
         int px = sx + 13;
         int row = 0;
         for (int pi = 0; pi < Theme.PRESETS.length; pi++) {
@@ -635,15 +657,16 @@ public class AuroraClickGui extends Screen {
             }
         }
 
-        // ===== мини-статистика включённых модулей =====
-        int statY = sy + sh - 46 - 56;
-        GfxEngine.rounded(g, sx + 4, statY, sw - 8, 44, 10, ColorUtil.rgba(255, 255, 255, (int) (8 * t)));
-        GfxEngine.outline(g, sx + 4, statY, sw - 8, 44, 10, ColorUtil.rgba(255, 255, 255, (int) (13 * t)), 1f);
+        // ===== мини-статистика включённых модулей (40px, чтобы палитра
+        // и статистика не слипались при укороченном сайдбаре) =====
+        int statY = sy + sh - 46 - 46;
+        GfxEngine.rounded(g, sx + 4, statY, sw - 8, 40, 10, ColorUtil.rgba(255, 255, 255, (int) (8 * t)));
+        GfxEngine.outline(g, sx + 4, statY, sw - 8, 40, 10, ColorUtil.rgba(255, 255, 255, (int) (13 * t)), 1f);
         int total = ModuleManager.all().size();
         int enabled = ModuleManager.enabled().size();
         float ratio = total <= 0 ? 0 : enabled / (float) total;
         int barW = sw - 28;
-        int barY = statY + 30;
+        int barY = statY + 28;
         GfxEngine.rounded(g, sx + 14, barY, barW, 3, 1.5f, ColorUtil.rgba(255, 255, 255, 26));
         int fw = Math.round(barW * ratio);
         if (fw > 2) {
@@ -694,25 +717,25 @@ public class AuroraClickGui extends Screen {
         // «Тема»
         float thv = themeRowHoverAnim.get();
         if (themeTab) {
-            RenderUtil.drawTextBold(g, font, "Тема", sx + 33, cy + 4 + 8, ColorUtil.rgb(255, 255, 255), theme);
+            RenderUtil.drawTextBold(g, font, "Тема", sx + 33, cy + 2 + 8, ColorUtil.rgb(255, 255, 255), theme);
         } else {
-            RenderUtil.drawText(g, font, "Тема", sx + 33, cy + 4 + 8,
+            RenderUtil.drawText(g, font, "Тема", sx + 33, cy + 2 + 8,
                     ColorUtil.lerp(theme.textSecondary(), ColorUtil.rgb(255, 255, 255), thv * 0.6f), theme);
         }
 
-        // подпись схемы
-        RenderUtil.drawText(g, font, "Цветовая схема", sx + 12, cy + 38 - 8, theme.textSecondary(), theme);
+        // подпись схемы (зазор от строки «Тема» и до кружков — не слипаются)
+        RenderUtil.drawText(g, font, "Цветовая схема", sx + 12, cy + 33, theme.textSecondary(), theme);
 
-        // мини-статистика
-        int statY = sy + (WIN_H - 20) - 46 - 56;
+        // мини-статистика (геометрия синхронна с drawSidebarShapes)
+        int statY = sy + (WIN_H - 20 - FOOTER_H + 6) - 46 - 46;
         int total = ModuleManager.all().size();
         int enabled = ModuleManager.enabled().size();
-        RenderUtil.drawText(g, font, "Включено модулей", sx + 14, statY + 8, theme.textSecondary(), theme);
-        RenderUtil.drawTextBold(g, font, enabled + " из " + total, sx + 14, statY + 18,
+        RenderUtil.drawText(g, font, "Включено модулей", sx + 14, statY + 7, theme.textSecondary(), theme);
+        RenderUtil.drawTextBold(g, font, enabled + " из " + total, sx + 14, statY + 17,
                 theme.textPrimary(), theme);
 
         // профиль
-        int profY = sy + (WIN_H - 20) - 46;
+        int profY = sy + (WIN_H - 20 - FOOTER_H + 6) - 46;
         String nick = Minecraft.getInstance().getUser().getName();
         String initial = nick.isEmpty() ? "A" : nick.substring(0, 1).toUpperCase();
         RenderUtil.drawCenteredText(g, font, initial, sx + 16, profY + 15, ColorUtil.rgb(255, 255, 255), theme);
@@ -949,14 +972,13 @@ public class AuroraClickGui extends Screen {
         float tabE = Animation.easeOutCubic(tabAnim.get());
         int slide = Math.round((1 - tabE) * 12);
         int cardsTop = bodyY + 32 + slide;
-        int viewH = bodyH - 32 - 6;
         moduleCount = 0;
         if (themeTab) {
             themeRows.clear();
             int colW = Math.min(320, bodyW - 12);
             int rx = bodyX + (bodyW - colW) / 2;
             themeRowsH = buildThemeRows(g, themeRows, rx, cardsTop + 18 - (int) scrollPos, colW);
-            maxScroll = Math.max(0, themeRowsH + 18 - viewH);
+            maxScroll = Math.max(0, themeRowsH + 18 - (bodyH - 49 - 4));
             scrollTarget = Math.max(0, Math.min(maxScroll, scrollTarget));
             scrollPos = Math.min(scrollPos, maxScroll);
             return;
@@ -964,10 +986,15 @@ public class AuroraClickGui extends Screen {
 
         List<Module> modules = currentModules();
         moduleCount = modules.size();
-        int colW = (bodyW - GAP) / 2;
+        // правые 8px тела — жёлоб скроллбара: карточки его не перекрывают
+        int colW = (bodyW - 8 - GAP) / 2;
         int[] colYs = new int[2];
         int contentH = 0;
         int idx = 0;
+        // высота видимой области СОВПАДАЕТ с областью отсечения (минус зазор):
+        // раньше вьюпорт был на 13px выше скиссора — нижняя строка карточки
+        // вечно резалась пополам у футера (поймано на скриншоте смоук-теста)
+        int viewH = bodyH - 49 - 4;
 
         for (Module m : modules) {
             int col = colYs[0] <= colYs[1] ? 0 : 1;
@@ -975,12 +1002,14 @@ public class AuroraClickGui extends Screen {
             int y = cardsTop + colYs[col] - (int) scrollPos;
             float et = expandT(m);
 
-            String desc = RenderUtil.ellipsize(font, m.description, colW - 26, theme);
+            // описание не должно налезать на тумблер: от левого поля 19px,
+            // зона тумблера 38px + 3px запаса
+            String desc = RenderUtil.ellipsize(font, m.description, colW - 60, theme);
             int headerH = 34;
             int rowsH = settingsHeight(m);
             int h = headerH + 8 + Math.round(rowsH * et);
 
-            List<Row> rows = et > 0.01f ? buildModuleRows(g, m, x, y + headerH + 8, colW - 20) : List.of();
+            List<Row> rows = et > 0.01f ? buildModuleRows(g, m, x + 12, y + headerH + 8, colW - 24) : List.of();
 
             colYs[col] += h + GAP;
             contentH = Math.max(contentH, colYs[col]);
@@ -992,6 +1021,32 @@ public class AuroraClickGui extends Screen {
         maxScroll = Math.max(0, contentH - viewH);
         scrollTarget = Math.max(0, Math.min(maxScroll, scrollTarget));
         scrollPos = Math.min(scrollPos, maxScroll);
+
+        // раскрытие настроек: прокручиваем список так, чтобы карточка
+        // (её полная раскрытая высота) поместилась в видимую область —
+        // раньше низ настроек резался футером и строки «заезжали» под него
+        if (revealPending != null) {
+            Module rm = revealPending;
+            revealPending = null;
+            for (Card card : cards) {
+                if (card.module == rm) {
+                    float fullH = card.headerH + 8f + settingsHeight(rm);
+                    // позиция карточки в контенте (без учёта текущего скролла)
+                    float contentY = card.y + scrollPos;
+                    // низ карточки должен попасть на 4px выше нижней границы
+                    float viewportBottom = bodyY + bodyH - 19;
+                    float need = contentY + fullH - viewportBottom + 4f;
+                    if (need > scrollPos + 1f) {
+                        // полный maxScroll ещё не посчитан (карточка растёт
+                        // анимацией) — расширяем его вручную и едем вниз
+                        scrollTarget = need;
+                        maxScroll = (int) Math.max(maxScroll, need);
+                        scrollPos = Math.max(scrollPos, Math.min(scrollTarget, maxScroll));
+                    }
+                    break;
+                }
+            }
+        }
     }
 
     private int settingsHeight(Module m) {
@@ -1006,7 +1061,9 @@ public class AuroraClickGui extends Screen {
                 h += 18;
             }
         }
-        return h + 18; // строка бинда есть у каждого модуля
+        // строка бинда есть у каждого модуля + 6px нижнего поля:
+        // последняя строка не прижимается к рамке карточки
+        return h + 24;
     }
 
     private Card buildCard(GuiGraphics g, Module m, int x, int y, int w, int h, int headerH, String desc,
@@ -1115,9 +1172,12 @@ public class AuroraClickGui extends Screen {
             g.pose().pushMatrix();
             g.pose().translate(0, dy);
             int a = Math.round(255 * ca);
-            // имя модуля — крупнее, полужирное; включённый — белым
+            // имя модуля — крупнее, полужирное; включённый — белым.
+            // эллипсис: длинное имя не должно налезать на тумблер
             int nameColor = m.isEnabled() ? ColorUtil.rgb(255, 255, 255) : theme.textPrimary();
-            RenderUtil.drawTextSize(g, font, m.name, x + 19, y + 5, 10f,
+            RenderUtil.drawTextSize(g, font,
+                    RenderUtil.ellipsizeSize(m.name, 10f, m.isEnabled(), w - 60),
+                    x + 19, y + 5, 10f,
                     ColorUtil.alpha(nameColor, a), m.isEnabled(), theme);
             RenderUtil.drawText(g, font, desc, x + 19, y + 21,
                     ColorUtil.alpha(theme.textSecondary(), (int) (a * 0.95f)), theme);
@@ -1152,15 +1212,30 @@ public class AuroraClickGui extends Screen {
         }
         RenderUtil.popScissor(g);
 
-        // полоса прокрутки — акцентная капсула
+        // полоса прокрутки — акцентная капсула (заметная, но не кричащая)
         if (maxScroll > 0) {
             int trackH = bodyH - 55;
             float ratio = (float) (bodyH - 30) / (maxScroll + bodyH - 30);
             int thumbH = Math.max(18, (int) (trackH * ratio));
             int thumbY = bodyY + 32 + (int) ((trackH - thumbH) * (scrollPos / (float) maxScroll));
-            GfxEngine.rounded(g, bodyX + bodyW - 4, thumbY, 3, thumbH, 1.5f,
-                    ColorUtil.alpha(theme.accentNow(), 150));
+            GfxEngine.rounded(g, bodyX + bodyW - 5, thumbY, 4, thumbH, 2f,
+                    ColorUtil.alpha(theme.accentNow(), 185));
         }
+    }
+
+    /** Мягкое затухание списка у нижней границы: обрезанная строка
+     *  растворяется в дымке цвета панели, а не режется «в лоб». */
+    private void drawListFade(GuiGraphics g) {
+        if (themeTab || cards.isEmpty() || maxScroll <= 0) {
+            return;
+        }
+        int fadeBottom = bodyY + bodyH - 19;
+        int fadeH = 15;
+        // почти непрозрачная снизу: панель сама тёмная, слабая дымка
+        // на ней не читалась вовсе (проверено пиксельным замером смоук-теста)
+        GfxEngine.roundedGradient(g, bodyX + 2, fadeBottom - fadeH, bodyW - 4, fadeH, 0,
+                ColorUtil.alpha(theme.panelColor(), 0),
+                ColorUtil.alpha(0x11121B, 235));
     }
 
     private void drawBodyTexts(GuiGraphics g) {
@@ -1189,6 +1264,9 @@ public class AuroraClickGui extends Screen {
         boolean now = !Boolean.TRUE.equals(expanded.get(m));
         expanded.put(m, now);
         expandAnims.computeIfAbsent(m, k -> new Animation(now ? 0 : 1, 13)).to(now ? 1 : 0);
+        if (now) {
+            revealPending = m; // при следующей разметке — прокрутить к карточке
+        }
     }
 
     /* ------------------------------------------------------------------ */
@@ -1230,6 +1308,7 @@ public class AuroraClickGui extends Screen {
 
     /** Строка-переключатель. */
     private Row boolRow(GuiGraphics g, String label, int x, int y, int w, Supplier<Boolean> get, Consumer<Boolean> set) {
+        final String lbl = RenderUtil.ellipsize(font, label, w - 30, theme);
         return new Row(() -> {
             float t = get.get() ? 1f : 0f;
             drawPill(g, x + w - 24, y + 3, 22, 12, t);
@@ -1237,7 +1316,7 @@ public class AuroraClickGui extends Screen {
                 set.accept(!get.get());
                 playClick();
             }));
-        }, () -> RenderUtil.drawText(g, font, label, x, y + 5, theme.textSecondary(), theme));
+        }, () -> RenderUtil.drawText(g, font, lbl, x, y + 5, theme.textSecondary(), theme));
     }
 
     /** Строка-слайдер. */
@@ -1266,8 +1345,10 @@ public class AuroraClickGui extends Screen {
                 playClick();
             }));
         }, () -> {
-            RenderUtil.drawText(g, font, label, x, y + 2, theme.textSecondary(), theme);
             String disp = display.get();
+            // подпись не должна налезать на значение справа — эллипсируем
+            String lbl = RenderUtil.ellipsize(font, label, w - RenderUtil.width(font, disp, theme) - 10, theme);
+            RenderUtil.drawText(g, font, lbl, x, y + 2, theme.textSecondary(), theme);
             RenderUtil.drawText(g, font, disp, x + w - RenderUtil.width(font, disp, theme), y + 2,
                     theme.textPrimary(), theme);
         });
@@ -1291,7 +1372,8 @@ public class AuroraClickGui extends Screen {
             if (openT > 0.01f) {
                 drawColorPickerShapes(g, sxp - 64, y + 20, 90, 88, get.get(), set, openT);
             }
-        }, () -> RenderUtil.drawText(g, font, label, x, y + 4, theme.textSecondary(), theme));
+        }, () -> RenderUtil.drawText(g, font,
+                RenderUtil.ellipsize(font, label, w - 34, theme), x, y + 4, theme.textSecondary(), theme));
     }
 
     /** Строка режима (значение со стрелками). */
@@ -1310,8 +1392,9 @@ public class AuroraClickGui extends Screen {
             }));
         }, () -> {
             int valW = RenderUtil.width(font, ms.display(), theme) + 30;
+            String lbl = RenderUtil.ellipsize(font, label, w - valW - 8, theme);
+            RenderUtil.drawText(g, font, lbl, x, y + 4, theme.textSecondary(), theme);
             int vx = x + w - valW;
-            RenderUtil.drawText(g, font, label, x, y + 4, theme.textSecondary(), theme);
             RenderUtil.drawText(g, font, "<", vx + 5, y + 4, theme.textSecondary(), theme);
             RenderUtil.drawText(g, font, ms.display(), vx + 15, y + 4, theme.textPrimary(), theme);
             RenderUtil.drawText(g, font, ">", vx + valW - 10, y + 4, theme.textSecondary(), theme);
@@ -1336,7 +1419,8 @@ public class AuroraClickGui extends Screen {
             String keyText = isListening ? "..." : keyName(get.get());
             int bw = Math.max(42, RenderUtil.width(font, keyText, theme) + 16);
             int bx = x + w - bw;
-            RenderUtil.drawText(g, font, label, x, y + 4, theme.textSecondary(), theme);
+            String lbl = RenderUtil.ellipsize(font, label, w - bw - 8, theme);
+            RenderUtil.drawText(g, font, lbl, x, y + 4, theme.textSecondary(), theme);
             RenderUtil.drawText(g, font, keyText, bx + bw / 2f - RenderUtil.width(font, keyText, theme) / 2f, y + 4,
                     isListening ? ColorUtil.rgb(255, 255, 255) : theme.textPrimary(), theme);
         });
@@ -1703,8 +1787,10 @@ public class AuroraClickGui extends Screen {
 
     private void drawFooterTexts(GuiGraphics g, int winX, int winY) {
         int footY = winY + WIN_H - FOOTER_H + 3;
+        // подсказка начинается от тела, а не от левого края окна: раньше
+        // текст лежал поверх стекла сайдбара и выглядел «обрезанным» им
         RenderUtil.drawText(g, font, "ЛКМ — вкл/выкл · ПКМ — настройки · Колесо — прокрутка",
-                winX + 16, footY + 5, theme.textSecondary(), theme);
+                bodyX + 2, footY + 5, theme.textSecondary(), theme);
         int btnX = winX + WIN_W - 14;
         String save = "Сохранить";
         int saveW = RenderUtil.width(font, save, theme) + 22;
