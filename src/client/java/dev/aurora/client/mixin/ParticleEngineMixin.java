@@ -36,6 +36,11 @@ public abstract class ParticleEngineMixin {
         if (ParticleModule.isCritical(options)) {
             return; // взрывы и вспышки не режем никогда
         }
+        // «Далёкие частицы»: за радиусом от камеры частица не создаётся
+        if (ParticleModule.shouldCullFar(x, y, z)) {
+            cir.setReturnValue(null);
+            return;
+        }
         float keep = m.keepFraction();
         if (keep >= 0.999f) {
             return;

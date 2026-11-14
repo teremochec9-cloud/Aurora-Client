@@ -242,6 +242,19 @@ public class AuroraClickGui extends Screen {
     @Override
     protected void init() {
         search = new EditBox(this.font, 0, 0, SEARCH_W - 20, 16, Component.literal("Поиск"));
+        // смоук-харнесс: AURORA_TEST_THEME=1 открывает вкладку «Тема» (скриншот-приёмка)
+        if ("1".equals(System.getenv("AURORA_TEST_THEME"))) {
+            themeTab = true;
+        }
+        // смоук-харнесс: AURORA_TEST_CAT=PROF|VISUAL|HUD|CHAT открывает категорию
+        String catEnv = System.getenv("AURORA_TEST_CAT");
+        if (catEnv != null && !catEnv.isEmpty()) {
+            try {
+                tab = dev.aurora.client.module.Category.valueOf(catEnv);
+                themeTab = false;
+            } catch (IllegalArgumentException ignored) {
+            }
+        }
         search.setMaxLength(40);
         search.setBordered(false);
         // только как обработчик ввода: текст поля рисует наш движок в стекле
@@ -618,6 +631,8 @@ public class AuroraClickGui extends Screen {
         int palY = themeY + 42;
         int px = sx + 13;
         int row = 0;
+        // низ палитры (для зазора с карточкой статистики): row2 + радиус кружка
+        final int palBottom = palY + 15 + 11;
         for (int pi = 0; pi < Theme.PRESETS.length; pi++) {
             String[] preset = Theme.PRESETS[pi];
             int c1 = (int) (0xFF000000L | Long.parseLong(preset[1], 16));
@@ -658,8 +673,10 @@ public class AuroraClickGui extends Screen {
         }
 
         // ===== мини-статистика включённых модулей (40px, чтобы палитра
-        // и статистика не слипались при укороченном сайдбаре) =====
-        int statY = sy + sh - 46 - 46;
+        // и статистика не слипались при укороченном сайдбаре).
+        // Зазор от палитры гарантирован: раньше при длинных категориях
+        // кружки упирались в карточку (замечено на скриншоте) =====
+        int statY = Math.max(palBottom + 5, sy + sh - 46 - 46);
         GfxEngine.rounded(g, sx + 4, statY, sw - 8, 40, 10, ColorUtil.rgba(255, 255, 255, (int) (8 * t)));
         GfxEngine.outline(g, sx + 4, statY, sw - 8, 40, 10, ColorUtil.rgba(255, 255, 255, (int) (13 * t)), 1f);
         int total = ModuleManager.all().size();
@@ -696,20 +713,25 @@ public class AuroraClickGui extends Screen {
         int logoW = RenderUtil.widthBold(font, Theme.CLIENT_NAME, theme);
         RenderUtil.drawText(g, font, Theme.CLIENT_VERSION, sx + 40 + logoW + 14, sy + 16,
                 ColorUtil.rgb(255, 255, 255), theme);
-        RenderUtil.drawText(g, font, "клиент для MC " + Theme.MC_VERSION, sx + 40, sy + 27,
-                ColorUtil.alpha(theme.textSecondary(), 150), theme);
+        // подпись «клиент для MC …» обрезается по ширине сайдбара: раньше
+        // строка упиралась в правый край и визуально «вылезала» за рамку
+        RenderUtil.drawText(g, font,
+                RenderUtil.ellipsize(font, "клиент для MC " + Theme.MC_VERSION, sw - 44, theme),
+                sx + 40, sy + 27, ColorUtil.alpha(theme.textSecondary(), 150), theme);
 
-        // категории: активная — белым полужирным
+        // категории: активная — белым полужирным; длинные названия
+        // («Производительность») обрезаются, не наезжая на край панели
         int cy = sy + 48;
         for (Category cat : Category.values()) {
             boolean active = !themeTab && tab == cat;
             Animation hvA = catHoverAnims.computeIfAbsent(cat, k -> new Animation(0, 14));
             float hv = hvA.get();
+            String label = RenderUtil.ellipsize(font, cat.title, sw - 33 - 2, theme);
             if (active) {
-                RenderUtil.drawTextBold(g, font, cat.title, sx + 33, cy + 8, ColorUtil.rgb(255, 255, 255), theme);
+                RenderUtil.drawTextBold(g, font, label, sx + 33, cy + 8, ColorUtil.rgb(255, 255, 255), theme);
             } else {
                 int col = ColorUtil.lerp(theme.textSecondary(), ColorUtil.rgb(255, 255, 255), hv * 0.6f);
-                RenderUtil.drawText(g, font, cat.title, sx + 33, cy + 8, col, theme);
+                RenderUtil.drawText(g, font, label, sx + 33, cy + 8, col, theme);
             }
             cy += CAT_STEP;
         }
@@ -726,8 +748,8 @@ public class AuroraClickGui extends Screen {
         // подпись схемы (зазор от строки «Тема» и до кружков — не слипаются)
         RenderUtil.drawText(g, font, "Цветовая схема", sx + 12, cy + 33, theme.textSecondary(), theme);
 
-        // мини-статистика (геометрия синхронна с drawSidebarShapes)
-        int statY = sy + (WIN_H - 20 - FOOTER_H + 6) - 46 - 46;
+        // мини-статистика (геометрия синхронна с drawSidebarShapes, зазор от палитры)
+        int statY = Math.max(cy + 2 + 42 + 15 + 11 + 5, sy + (WIN_H - 20 - FOOTER_H + 6) - 46 - 46);
         int total = ModuleManager.all().size();
         int enabled = ModuleManager.enabled().size();
         RenderUtil.drawText(g, font, "Включено модулей", sx + 14, statY + 7, theme.textSecondary(), theme);

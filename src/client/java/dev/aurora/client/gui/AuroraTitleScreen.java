@@ -2,7 +2,6 @@ package dev.aurora.client.gui;
 
 import dev.aurora.client.AuroraClient;
 import dev.aurora.client.config.AuroraConfig;
-import dev.aurora.client.module.ModuleManager;
 import dev.aurora.client.theme.Theme;
 import dev.aurora.client.util.Animation;
 import dev.aurora.client.util.ColorUtil;
@@ -21,57 +20,57 @@ import net.minecraft.client.gui.screens.worldselection.SelectWorldScreen;
 import net.minecraft.client.input.KeyEvent;
 import net.minecraft.client.input.MouseButtonEvent;
 import net.minecraft.network.chat.Component;
-import org.lwjgl.glfw.GLFW;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
- * Главное меню Aurora — «Дым».
+ * Главное меню Aurora — «Полночь».
  *
- * <p>Глубокий градиент с живым многослойным дымом: три слоя мягких радиальных
- * пятен медленно всплывают, покачиваются и реагируют параллаксом на курсор.
- * Позиция каждой точки дыма — чистая функция времени кадра ({@link FrameClock}),
- * поэтому анимация идеально плавная при любой частоте кадров и без аллокаций.</p>
+ * <p>Полностью новый титульный экран в чёрном стиле: глубокий
+ * чёрный градиент, мерцающее звёздное поле, медленные ленты северного
+ * сияния в фирменном акценте, дрейфующие пылинки и мягкое «дыхание»
+ * света за иконкой. Всё движение — чистые функции времени кадра
+ * ({@link FrameClock}), поэтому анимация идеально плавная при любой
+ * частоте кадров и без аллокаций.</p>
  *
- * <p>Центр композиции — бренд-иконка Aurora (процедурная «A» на фиолетовом
- * сквиркле, {@link IconPainter}): плавно всплывает при появлении, мягко
- * «дышит» свечением и чуть покачивается. Под ней крупное приветствие
- * «С возвращением, игрок» и кнопки: первая — акцентная (primary), остальные —
- * стекло. Экран затемнён по бокам (мягкие боковые градиенты), центр — светлее.</p>
- *
- * <p>Оптимизация: ни панорамы, ни полного экранного gaussian-блюра; параметры
- * дыма в плоских массивах, строки кэшируются, время читается один раз.</p>
+ * <p>Композиция: анимированная иконка «Полярная звезда»
+ * ({@link IconPainter#drawAnimated}) → вордмарк AURORA с переливом
+ * по буквам → приветствие с ником → две строки кнопок. Каскад
+ * появления: каждый элемент выезжает чуть позже предыдущего.
+ * Курсор мягко сдвигает слои фона (параллакс с инерцией).</p>
  */
 public class AuroraTitleScreen extends Screen {
     private static final Logger LOG = LoggerFactory.getLogger("Aurora/Title");
     private final Theme theme;
 
     /* ------------------------------------------------------------------ */
-    /*  Дым: параметры в плоских массивах (нулевые аллокации в кадре)      */
+    /*  Звёзды, сияние, пыль — плоские массивы (ноль аллокаций в кадре)    */
     /* ------------------------------------------------------------------ */
 
-    private static final int LAYER_FAR = 10;  // дальний дым: большой, медленный, тусклее
-    private static final int LAYER_MID = 8;   // средний слой — основной объём дыма
-    private static final int LAYER_NEAR = 8;  // ближний дым поверх контента (по углам)
-    private static final int PUFFS = LAYER_FAR + LAYER_MID + LAYER_NEAR;
+    /** Звёзды: x, y, размер, фаза — детерминированный сид. */
+    private static final int STARS = 110;
+    private static final int SF = 4;
+    private final float[] stars = new float[STARS * SF];
 
-    /** Шаг в массиве puff: x, y, r, speed, swayAmp, swayFreq, phase, alpha. */
-    private static final int PF = 8;
-    private final float[] puff = new float[PUFFS * PF];
+    /** Пылинки: x, y, скорость, размер, фаза. */
+    private static final int MOTES = 20;
+    private static final int MF = 5;
+    private final float[] motes = new float[MOTES * MF];
 
-    /** Пылинки: x, y, speed, size, phase. */
-    private static final int DUST = 26;
-    private static final int DF = 5;
-    private final float[] dust = new float[DUST * DF];
-
-    /** Слой точки дыма: 0 — дальний, 1 — средний, 2 — ближний. */
-    private static int layerOf(int i) {
-        return i < LAYER_FAR ? 0 : (i < LAYER_FAR + LAYER_MID ? 1 : 2);
-    }
+    /** Слои сияния: базовая высота (доля), амплитуда, частота, радиус, альфа, параллакс. */
+    private static final float[][] RIBBONS = {
+            {0.12f, 26f, 0.11f, 44f, 18f, 0.010f},
+            {0.20f, 34f, 0.07f, 58f, 14f, 0.016f},
+            {0.29f, 22f, 0.05f, 38f, 10f, 0.024f},
+    };
+    /** Шаг сэмплов ленты (gui-пиксели). */
+    private static final int RIBBON_STEP = 30;
+    /** Буфер дуги сияния (до 96 точек). */
+    private final float[] arcBuf = new float[192];
 
     /* ------------------------------------------------------------------ */
     /*  Кнопки                                                            */
@@ -83,14 +82,14 @@ public class AuroraTitleScreen extends Screen {
     };
     private static final int MAIN_BTNS = 5;
 
-    /** Плавное наведение: 5 главных + 2 мелкие; нажатие — только главные. */
+    /** Плавное наведение: 5 главных + 2 мелкие. */
     private final Animation[] hoverAnims = new Animation[MAIN_BTNS + 2];
     private final Animation[] pressAnims = new Animation[MAIN_BTNS];
-    /** Плавный параллакс дыма за курсором. */
+    /** Инерционный параллакс фона за курсором. */
     private final Animation parallaxX = new Animation(0, 4.5f);
     private final Animation parallaxY = new Animation(0, 4.5f);
 
-    /** Момент рождения экрана — от него отсчитываются все каскады появления. */
+    /** Момент рождения экрана — от него идёт каскад появления. */
     private long bornAt;
 
     /** Кэш строк, чтобы не собирать их каждый кадр. */
@@ -123,26 +122,19 @@ public class AuroraTitleScreen extends Screen {
 
     @Override
     protected void init() {
-        // init() вызывается и при смене размера окна — тогда только плавно
-        // масштабируем уже существующий дым, чтобы картинка не «прыгала»
-        if (lastW <= 0 || lastH <= 0 || puff[2] <= 0) {
-            seedPuffs(this.width, this.height);
+        // init() вызывается и при смене размера окна — пересаживаем звёзды
+        // с масштабированием, чтобы картинка не «прыгала»
+        if (lastW <= 0 || lastH <= 0) {
+            seedSky(this.width, this.height);
         } else if (this.width != lastW || this.height != lastH) {
-            rescalePuffs(lastW, lastH, this.width, this.height);
+            rescaleSky(lastW, lastH, this.width, this.height);
         }
         lastW = this.width;
         lastH = this.height;
 
-        Minecraft mc = Minecraft.getInstance();
-        try {
-            LOG.info("титул: gui {}x{}, окно {}x{}, scale {}",
-                    this.width, this.height,
-                    mc.getWindow().getWidth(), mc.getWindow().getHeight(), mc.getWindow().getGuiScale());
-        } catch (Exception ignored) {
-        }
         if (versionLine == null) {
             try {
-                nick = mc.getUser().getName();
+                nick = Minecraft.getInstance().getUser().getName();
             } catch (Exception ignored) {
             }
             versionLine = "Aurora " + Theme.CLIENT_VERSION + " · клиент для Minecraft " + Theme.MC_VERSION;
@@ -150,53 +142,41 @@ public class AuroraTitleScreen extends Screen {
     }
 
     /* ------------------------------------------------------------------ */
-    /*  Генерация дыма                                                    */
+    /*  Генерация звёздного неба                                          */
     /* ------------------------------------------------------------------ */
 
-    private void seedPuffs(int w, int h) {
-        Random random = new Random(0xC0FFEEL);
-        for (int i = 0; i < PUFFS; i++) {
-            int layer = layerOf(i);
-            float k = w / 640f;
-            float base = layer == 0 ? 0.42f : (layer == 1 ? 0.26f : 0.18f);
-            puff[i * PF + 0] = random.nextFloat() * w;                                  // x
-            puff[i * PF + 1] = random.nextFloat() * h;                                  // y
-            puff[i * PF + 2] = h * (base + random.nextFloat() * (base * 0.8f));          // радиус
-            puff[i * PF + 3] = (layer == 0 ? 2.6f : layer == 1 ? 5.0f : 8.5f)
-                    * (0.7f + random.nextFloat() * 0.6f);                               // скорость всплытия
-            puff[i * PF + 4] = (12 + random.nextFloat() * 30) * k;                       // амплитуда покачивания
-            puff[i * PF + 5] = 0.08f + random.nextFloat() * 0.12f;                       // частота покачивания
-            puff[i * PF + 6] = random.nextFloat() * 6.2831853f;                          // фаза
-            puff[i * PF + 7] = layer == 0 ? 52 + random.nextFloat() * 16
-                    : layer == 1 ? 46 + random.nextFloat() * 15
-                    : 18 + random.nextFloat() * 8;                                      // альфа
+    private void seedSky(int w, int h) {
+        Random random = new Random(0x501A1CEL);
+        for (int i = 0; i < STARS; i++) {
+            stars[i * SF + 0] = random.nextFloat() * w;                      // x
+            stars[i * SF + 1] = random.nextFloat() * h * 0.72f;              // y — верхние 72%
+            stars[i * SF + 2] = 0.7f + random.nextFloat() * 1.1f;            // размер
+            stars[i * SF + 3] = random.nextFloat() * 6.2831853f;             // фаза
         }
-        for (int i = 0; i < DUST; i++) {
-            dust[i * DF + 0] = random.nextFloat() * w;
-            dust[i * DF + 1] = random.nextFloat() * h;
-            dust[i * DF + 2] = 2.5f + random.nextFloat() * 6f;
-            dust[i * DF + 3] = 0.9f + random.nextFloat() * 1.3f;
-            dust[i * DF + 4] = random.nextFloat() * 6.2831853f;
+        for (int i = 0; i < MOTES; i++) {
+            motes[i * MF + 0] = random.nextFloat() * w;
+            motes[i * MF + 1] = random.nextFloat() * h;
+            motes[i * MF + 2] = 2.0f + random.nextFloat() * 4.5f;            // скорость всплытия
+            motes[i * MF + 3] = 0.8f + random.nextFloat() * 1.2f;            // размер
+            motes[i * MF + 4] = random.nextFloat() * 6.2831853f;             // фаза
         }
     }
 
-    private void rescalePuffs(int oldW, int oldH, int newW, int newH) {
+    private void rescaleSky(int oldW, int oldH, int newW, int newH) {
         float kx = newW / (float) oldW;
         float ky = newH / (float) oldH;
-        for (int i = 0; i < PUFFS; i++) {
-            puff[i * PF + 0] *= kx;
-            puff[i * PF + 1] *= ky;
-            puff[i * PF + 2] *= ky;
-            puff[i * PF + 4] *= kx;
+        for (int i = 0; i < STARS; i++) {
+            stars[i * SF + 0] *= kx;
+            stars[i * SF + 1] *= ky;
         }
-        for (int i = 0; i < DUST; i++) {
-            dust[i * DF + 0] *= kx;
-            dust[i * DF + 1] *= ky;
+        for (int i = 0; i < MOTES; i++) {
+            motes[i * MF + 0] *= kx;
+            motes[i * MF + 1] *= ky;
         }
     }
 
     /* ------------------------------------------------------------------ */
-    /*  Фон: градиент + северное сияние + дым + пыль + затемнение боков    */
+    /*  Фон: чёрный градиент + звёзды + сияние + пыль                     */
     /* ------------------------------------------------------------------ */
 
     @Override
@@ -205,114 +185,133 @@ public class AuroraTitleScreen extends Screen {
         this.mouseY = my;
         float elapsed = (FrameClock.now() - bornAt) / 1000.0f;
         float t = FrameClock.seconds();
-        // дым «проявляется» первые ~2.2 секунды
-        float dens = Animation.smooth(elapsed / 2.2f);
+        boolean anim = theme.animations;
+        // dens: фон проявляется первые ~1.8 с (или мгновенно без анимаций)
+        float dens = anim ? Animation.smooth(clamp01(elapsed / 1.8f)) : 1f;
+        if (dens <= 0.01f) {
+            g.fillGradient(0, 0, this.width, this.height, 0xFF05060A, 0xFF05060A);
+            return;
+        }
 
-        // параллакс дыма за курсором (плавный, инерционный)
-        parallaxX.to(mx - this.width / 2f);
-        parallaxY.to(my - this.height / 2f);
+        // параллакс: инерционное следование за курсором
+        parallaxX.to((mx - this.width / 2f) * (anim ? 1f : 0f));
+        parallaxY.to((my - this.height / 2f) * (anim ? 1f : 0f));
         float px = parallaxX.update();
         float py = parallaxY.update();
 
-        int h = this.height;
         int w = this.width;
-
-        // ===== градиент: центр светлее, края уйдут в затемнение =====
-        g.fillGradient(0, 0, w, h / 2,
-                ColorUtil.rgb(13, 15, 27), ColorUtil.rgb(21, 23, 41));
-        g.fillGradient(0, h / 2, w, h,
-                ColorUtil.rgb(21, 23, 41), ColorUtil.rgb(9, 10, 20));
-
+        int h = this.height;
         int accent = theme.accentNow();
+        int accent2 = theme.accent(1.0f);
 
-        // ===== «северное сияние»: широкая медленная полоса над центром =====
-        float bandX = w / 2f + (float) Math.sin(t * 0.05f) * w * 0.18f;
-        int auroraCol = ColorUtil.lerp(ColorUtil.rgb(96, 108, 148), accent, 0.55f);
-        GfxEngine.radial(g, bandX, h * 0.16f, Math.max(w, h) * 0.85f,
-                ColorUtil.alpha(auroraCol, (int) (30 * dens)),
-                ColorUtil.alpha(auroraCol, 0));
+        // ===== глубокий чёрный градиент (стиль «Полночь») =====
+        g.fillGradient(0, 0, w, h / 2,
+                ColorUtil.rgb(4, 5, 9), ColorUtil.rgb(8, 10, 16));
+        g.fillGradient(0, h / 2, w, h,
+                ColorUtil.rgb(8, 10, 16), ColorUtil.rgb(3, 4, 6));
 
-        // ===== световой колодец по центру (иконка будет «в свете») =====
-        GfxEngine.radial(g, w / 2f, h * 0.30f, Math.max(w, h) * 0.62f,
-                ColorUtil.alpha(ColorUtil.rgb(120, 130, 175), (int) (20 * dens)),
-                ColorUtil.alpha(ColorUtil.rgb(120, 130, 175), 0));
-
-        // ===== дым =====
-        // цвета слоёв: холодный сине-серый с примесью акцента
-        int slate = ColorUtil.rgb(96, 108, 148);
-        int colFar = ColorUtil.lerp(slate, accent, 0.42f);
-        int colMid = ColorUtil.lerp(slate, accent, 0.58f);
-
-        for (int i = 0; i < PUFFS; i++) {
-            if (layerOf(i) == 2) {
-                continue; // ближний слой рисуется поверх контента
-            }
-            drawPuff(g, i, t, dens, px, py, colFar, colMid);
-        }
-
-        // ===== свечение снизу — «дышит» =====
-        float pulse = 0.72f + 0.28f * (float) Math.sin(t * 0.6);
-        GfxEngine.radial(g, w / 2f, h * 1.04f, h * 1.55f,
-                ColorUtil.alpha(accent, (int) (52 * pulse * dens)),
+        // ===== дыхание света за иконкой — рисуем ПЕРВЫМ, под звёздами и
+        // лентами: свечение — лишь намёк, фон обязан оставаться чёрным
+        float pulse = 0.72f + 0.28f * (float) Math.sin(t * 0.7f);
+        GfxEngine.radial(g, w / 2f, h * 0.30f, Math.max(w, h) * 0.40f,
+                ColorUtil.alpha(accent, (int) (15 * pulse * dens)),
                 ColorUtil.alpha(accent, 0));
 
-        // ===== пылинки =====
-        for (int i = 0; i < DUST; i++) {
-            float x0 = dust[i * DF + 0];
-            float speed = dust[i * DF + 2];
-            float size = dust[i * DF + 3];
-            float phase = dust[i * DF + 4];
-            float span = h + 20;
-            float y = wrap(x0 - t * speed, -10, span);
-            float x = x0 + (float) Math.sin(t * 0.4f + phase) * 6f;
-            float twinkle = 0.45f + 0.55f * (float) Math.abs(Math.sin(t * 0.9f + phase * 2.1f));
-            GfxEngine.circle(g, x, y, size,
-                    ColorUtil.rgba(255, 255, 255, (int) (74 * twinkle * dens)));
+        // ===== тёплое зарево у нижней кромки — едва заметное.
+        // ФИКС: раньше ядро было полностью непрозрачным (ColorUtil.lerp двух
+        // opaque-цветов давал alpha 255) и рисовал гигантский серый овал
+        // поверх звёзд и лент. Теперь — полупрозрачный цвет, под всем
+        // остальным, и радиус меньше, чтобы край не выходил за экран.
+        GfxEngine.radial(g, w / 2f, h * 1.18f, h * 1.1f,
+                ColorUtil.alpha(ColorUtil.lerp(ColorUtil.rgb(13, 15, 26), accent, 0.16f),
+                        (int) (26 * dens)),
+                ColorUtil.alpha(ColorUtil.rgb(3, 4, 6), 0));
+
+        // ===== звёзды: мерцание + параллакс дальнего слоя =====
+        for (int i = 0; i < STARS; i++) {
+            float sx = stars[i * SF + 0] + px * 0.014f;
+            float sy = stars[i * SF + 1] + py * 0.008f;
+            float size = stars[i * SF + 2];
+            float phase = stars[i * SF + 3];
+            float twinkle = 0.35f + 0.65f * (float) Math.abs(Math.sin(t * 0.7f + phase * 2.3f));
+            int a = (int) (150 * twinkle * dens);
+            if (a <= 1) {
+                continue;
+            }
+            GfxEngine.circle(g, sx, sy, size, ColorUtil.rgba(235, 238, 250, a));
         }
 
-        // ===== затемнение по бокам (вместо сплошной чёрной подложки) =====
-        float side = 0.34f; // доля ширины, которую занимает каждое затемнение
-        GfxEngine.gradientH(g, 0, 0, w * side, h,
-                ColorUtil.rgba(0, 0, 0, (int) (132 * dens)),
-                ColorUtil.rgba(0, 0, 0, 0));
-        GfxEngine.gradientH(g, w * (1f - side), 0, w * side, h,
-                ColorUtil.rgba(0, 0, 0, 0),
-                ColorUtil.rgba(0, 0, 0, (int) (132 * dens)));
+        // ===== северное сияние: три слоя мягких лент из светящихся пятен =====
+        for (float[] rb : RIBBONS) {
+            drawRibbon(g, rb, t, dens, px, py, accent, accent2, w);
+        }
 
-        // мягкая общая виньетка — не глушит дым по углам
-        RenderUtil.vignette(g, w, h, ColorUtil.rgba(0, 0, 0, 40));
+        // ===== тонкая дуга-«стрежень» поверх лент — графичная деталь =====
+        drawAuroraArc(g, t, dens, px, accent, w, h);
+
+        // ===== пылинки =====
+        for (int i = 0; i < MOTES; i++) {
+            float x0 = motes[i * MF + 0];
+            float speed = motes[i * MF + 2];
+            float size = motes[i * MF + 3];
+            float phase = motes[i * MF + 4];
+            float span = h + 16;
+            float y = wrap(motes[i * MF + 1] - t * speed, -8, span);
+            float x = x0 + (float) Math.sin(t * 0.35f + phase) * 7f + px * 0.03f;
+            float twinkle = 0.4f + 0.6f * (float) Math.abs(Math.sin(t * 0.8f + phase * 1.9f));
+            GfxEngine.circle(g, x, y, size,
+                    ColorUtil.rgba(255, 255, 255, (int) (60 * twinkle * dens)));
+        }
+
+        // виньетка — мягко уводит углы в черноту
+        RenderUtil.vignette(g, w, h, ColorUtil.rgba(0, 0, 0, 46));
     }
 
-    /** Одна точка дыма: всплытие + покачивание + параллакс слоя. */
-    private void drawPuff(GuiGraphics g, int i, float t, float dens, float px, float py, int colFar, int colMid) {
-        int layer = layerOf(i);
-        float x0 = puff[i * PF + 0];
-        float y0 = puff[i * PF + 1];
-        float r = puff[i * PF + 2];
-        float speed = puff[i * PF + 3];
-        float amp = puff[i * PF + 4];
-        float freq = puff[i * PF + 5];
-        float phase = puff[i * PF + 6];
-        float alpha = puff[i * PF + 7];
+    /** Один слой сияния: ряд мягких радиальных пятен по синусоиде. */
+    private void drawRibbon(GuiGraphics g, float[] rb, float t, float dens,
+                            float px, float py, int accent, int accent2, int w) {
+        float baseYF = rb[0];
+        float amp = rb[1];
+        float freq = rb[2];
+        float rad = rb[3];
+        float alpha = rb[4];
+        float par = rb[5];
 
-        float span = this.height + r * 4;
-        float y = wrap(y0 - t * speed, -r * 2, span);
-        float x = x0 + (float) Math.sin(t * freq + phase) * amp;
+        for (float x = -rad; x <= w + rad; x += RIBBON_STEP) {
+            float f = x / Math.max(1f, w);
+            float y = this.height * baseYF
+                    + (float) Math.sin(t * freq + x * 0.013f) * amp
+                    + (float) Math.sin(t * freq * 0.53f + x * 0.029f + 1.7f) * amp * 0.45f
+                    + py * par;
+            float breathe = 0.75f + 0.25f * (float) Math.sin(t * 0.4f + x * 0.021f);
+            int col = ColorUtil.lerp(accent, accent2, f);
+            int a = (int) (alpha * breathe * dens);
+            if (a <= 1) {
+                continue;
+            }
+            GfxEngine.radial(g, x + px * par * 1.6f, y, rad * 2.4f,
+                    ColorUtil.alpha(col, a), ColorUtil.alpha(col, 0));
+        }
+    }
 
-        // параллакс: дальний слой почти не двигается, средний — заметнее
-        float kx = layer == 0 ? 0.022f : 0.05f;
-        float ky = layer == 0 ? 0.012f : 0.026f;
-        x += px * kx;
-        y += py * ky;
-
-        // медленное «дыхание» плотности
-        float breathe = 0.82f + 0.18f * (float) Math.sin(t * 0.33f + phase);
-        int col = layer == 0 ? colFar : colMid;
-        int core = ColorUtil.alpha(col, (int) (alpha * breathe * dens));
-        if (ColorUtil.alphaI(core) <= 0) {
+    /** Тонкая светлая дуга поверх лент — «стрежень» сияния. */
+    private void drawAuroraArc(GuiGraphics g, float t, float dens, float px, int accent, int w, int h) {
+        int n = 32;
+        if (arcBuf.length < (n + 1) * 2) {
             return;
         }
-        GfxEngine.radial(g, x, y, r * 2, core, ColorUtil.alpha(col, 0));
+        for (int i = 0; i <= n; i++) {
+            float f = i / (float) n;
+            float x = f * w;
+            float y = h * 0.14f
+                    + (float) Math.sin(t * 0.09f + f * 4.4f) * h * 0.035f
+                    + (float) Math.sin(t * 0.05f + f * 9.1f) * h * 0.016f;
+            arcBuf[i * 2] = x + px * 0.02f;
+            arcBuf[i * 2 + 1] = y;
+        }
+        GfxEngine.pathStroke(g, arcBuf, n + 1,
+                ColorUtil.alpha(ColorUtil.lerp(accent, ColorUtil.rgb(255, 255, 255), 0.45f),
+                        (int) (44 * dens)), 1.2f, false);
     }
 
     /** Циклическое значение в диапазоне [min, max). */
@@ -338,8 +337,8 @@ public class AuroraTitleScreen extends Screen {
         Minecraft mc = Minecraft.getInstance();
         float elapsed = (FrameClock.now() - bornAt) / 1000.0f;
         float t = FrameClock.seconds();
+        boolean anim = theme.animations;
 
-        // все анимации кадра обновляются ровно один раз — здесь
         for (Animation a : hoverAnims) {
             a.update();
         }
@@ -351,83 +350,80 @@ public class AuroraTitleScreen extends Screen {
         int w = this.width;
         int h = this.height;
 
-        // ===== бренд-иконка =====
-        int iconSize = compact ? 44 : 64;
-        float it = Animation.easeOutBack(clamp01((elapsed - 0.05f) / 0.75f));
-        float iconCy = h * 0.26f + (1 - it) * -26;
-        float bob = (float) Math.sin(t * 0.8f) * 2.2f; // мягкое покачивание
+        // ===== иконка «Полярная звезда»: всплытие + пульс свечения =====
+        int iconSize = compact ? 52 : 76;
+        float it = anim ? Animation.easeOutBack(clamp01((elapsed - 0.05f) / 0.75f)) : 1f;
+        float iconCy = h * 0.255f + (1 - it) * -24;
+        float bob = anim ? (float) Math.sin(t * 0.75f) * 2.0f : 0f;
         float iconAlpha = clamp01(it);
 
-        // дыхание свечения вокруг иконки
         float gpulse = 0.62f + 0.38f * (float) Math.sin(t * 0.9f);
         g.pose().pushMatrix();
-        float isc = 0.82f + 0.18f * it;
+        float isc = anim ? 0.84f + 0.16f * it : 1f;
         g.pose().translate(w / 2f, iconCy + bob);
         g.pose().scale(isc, isc);
         g.pose().translate(-w / 2f, -(iconCy + bob));
-        IconPainter.draw(g, w / 2f, iconCy + bob, iconSize,
-                (int) (72 * gpulse * iconAlpha));
+        IconPainter.drawAnimated(g, w / 2f, iconCy + bob, iconSize,
+                (int) (92 * gpulse * iconAlpha));
         g.pose().popMatrix();
 
+        // ===== вордмарк AURORA: межбуквенный разряд + перелив =====
+        float wmT = anim ? Animation.smooth(clamp01((elapsed - 0.3f) / 0.6f)) : 1f;
+        float wmSize = compact ? 13.5f : 19f;
+        float wmSpacing = wmSize * 0.46f;
+        float wmY = iconCy + iconSize / 2f + (compact ? 8 : 11) + (1 - wmT) * 9;
+        if (wmT > 0.01f) {
+            drawWordmark(g, Theme.CLIENT_NAME.toUpperCase(), w / 2f, wmY, wmSize, wmSpacing,
+                    (int) (255 * wmT), t);
+        }
+
         // ===== приветствие: «С возвращением, <ник>» =====
-        float ht = Animation.smooth(clamp01((elapsed - 0.35f) / 0.65f));
-        float headSize = compact ? 10.5f : 14f;
+        float ht = anim ? Animation.smooth(clamp01((elapsed - 0.45f) / 0.55f)) : 1f;
+        float headSize = compact ? 10f : 13f;
         String prefix = "С возвращением, ";
         float pw = RenderUtil.widthSize(prefix, headSize, false);
         float nw = RenderUtil.widthSize(nick, headSize, true);
-        float headY = iconCy + iconSize / 2f + 10 + (1 - ht) * 10;
+        float headY = wmY + wmSize * 1.25f + (compact ? 2 : 4) + (1 - ht) * 8;
         if (ht > 0.01f) {
             float hx = w / 2f - (pw + nw) / 2f;
             RenderUtil.drawTextSize(g, font, prefix, hx, headY, headSize,
-                    ColorUtil.alpha(theme.textPrimary(), (int) (240 * ht)), false, theme);
+                    ColorUtil.alpha(theme.textPrimary(), (int) (235 * ht)), false, theme);
             RenderUtil.drawTextSize(g, font, nick, hx + pw, headY, headSize,
                     ColorUtil.alpha(theme.accentNow(), (int) (255 * ht)), true, theme);
         }
 
         // ===== подпись с версией =====
-        float st = Animation.smooth(clamp01((elapsed - 0.5f) / 0.6f));
-        float subY = headY + headSize + 5;
+        float st = anim ? Animation.smooth(clamp01((elapsed - 0.55f) / 0.5f)) : 1f;
+        float subY = headY + headSize + (compact ? 3 : 5);
         if (st > 0.01f) {
             RenderUtil.drawCenteredText(g, font, versionLine, w / 2f, subY,
-                    ColorUtil.alpha(theme.textSecondary(), (int) (205 * st)), theme);
+                    ColorUtil.alpha(theme.textSecondary(), (int) (190 * st)), theme);
         }
 
         // ===== кнопки =====
-        int row1H = compact ? 26 : 36;
-        int row2H = compact ? 22 : 30;
-        int row1W = compact ? 178 : 224;
-        int row2W = compact ? 116 : 146;
+        int row1H = compact ? 24 : 34;
+        int row2H = compact ? 20 : 28;
+        int row1W = compact ? 168 : 220;
+        int row2W = compact ? 110 : 144;
         int gap = compact ? 6 : 10;
-        int row1Y = Math.round(subY + (compact ? 13 : 22));
+        int row1Y = Math.round(subY + (compact ? 12 : 20));
         int row2Y = row1Y + row1H + gap + 2;
 
         int bx = w / 2 - row1W - gap / 2;
-        button(g, 0, bx, row1Y, row1W, row1H, elapsed);
-        button(g, 1, bx + row1W + gap, row1Y, row1W, row1H, elapsed);
+        button(g, 0, bx, row1Y, row1W, row1H, elapsed, anim);
+        button(g, 1, bx + row1W + gap, row1Y, row1W, row1H, elapsed, anim);
 
         int row2Total = row2W * 3 + gap * 2;
         bx = w / 2 - row2Total / 2;
         for (int i = 2; i < 5; i++) {
-            button(g, i, bx, row2Y, row2W, row2H, elapsed);
+            button(g, i, bx, row2Y, row2W, row2H, elapsed, anim);
             bx += row2W + gap;
         }
 
-        // ===== ближний дым (поверх контента, по нижним углам, едва заметный) =====
-        int accent = theme.accentNow();
-        int slate = ColorUtil.rgb(96, 108, 148);
-        int colNear = ColorUtil.lerp(slate, accent, 0.68f);
-        float dens = Animation.smooth(elapsed / 2.2f);
-        for (int i = 0; i < PUFFS; i++) {
-            if (layerOf(i) != 2) {
-                continue;
-            }
-            drawNearPuff(g, i, t, dens, colNear);
-        }
-
         // ===== мелкие кнопки справа снизу =====
-        float ft = Animation.smooth(clamp01((elapsed - 0.85f) / 0.6f));
-        int sbY = this.height - (compact ? 22 : 34);
-        int sbX = this.width - 10;
+        float ft = anim ? Animation.smooth(clamp01((elapsed - 0.85f) / 0.55f)) : 1f;
+        int sbY = h - (compact ? 22 : 34);
+        int sbX = w - 10;
         sbX = smallButton(g, sbX, sbY, "Спец. возможности", MAIN_BTNS, ft, () ->
                 mc.setScreen(new AccessibilityOptionsScreen(this, mc.options)));
         smallButton(g, sbX, sbY, "Язык", MAIN_BTNS + 1, ft, () ->
@@ -437,10 +433,10 @@ public class AuroraTitleScreen extends Screen {
         if (ft > 0.01f) {
             if (compact) {
                 RenderUtil.drawText(g, font, "Aurora " + Theme.CLIENT_VERSION + " · " + mc.getFps() + " fps",
-                        8, this.height - 12, ColorUtil.alpha(theme.textSecondary(), (int) (200 * ft)), theme);
+                        8, h - 12, ColorUtil.alpha(theme.textSecondary(), (int) (200 * ft)), theme);
             } else {
-                RenderUtil.drawText(g, font, versionLine, 8, this.height - 12,
-                        ColorUtil.alpha(theme.textSecondary(), (int) (215 * ft)), theme);
+                RenderUtil.drawText(g, font, versionLine, 8, h - 12,
+                        ColorUtil.alpha(theme.textSecondary(), (int) (210 * ft)), theme);
                 // fps обновляем не чаще 2 раз в секунду
                 long now = FrameClock.now();
                 if (now - fpsLineAt > 500) {
@@ -448,31 +444,51 @@ public class AuroraTitleScreen extends Screen {
                     fpsLine = mc.getFps() + " fps";
                 }
                 RenderUtil.drawText(g, font, fpsLine,
-                        this.width - 10 - RenderUtil.width(font, fpsLine, theme), this.height - 12,
-                        ColorUtil.alpha(theme.textSecondary(), (int) (215 * ft)), theme);
+                        w - 10 - RenderUtil.width(font, fpsLine, theme), h - 12,
+                        ColorUtil.alpha(theme.textSecondary(), (int) (210 * ft)), theme);
             }
         }
     }
 
-    /** Ближний дым: всплывает снизу вдоль углов, чтобы не мешать кнопкам. */
-    private void drawNearPuff(GuiGraphics g, int i, float t, float dens, int colNear) {
-        float x0 = puff[i * PF + 0];
-        float y0 = puff[i * PF + 1];
-        float r = puff[i * PF + 2];
-        float speed = puff[i * PF + 3];
-        float amp = puff[i * PF + 4];
-        float freq = puff[i * PF + 5];
-        float phase = puff[i * PF + 6];
-        float alpha = puff[i * PF + 7];
+    /* ------------------------------------------------------------------ */
+    /*  Вордмарк                                                          */
+    /* ------------------------------------------------------------------ */
 
-        // прижимаем к нижней половине экрана
-        float span = this.height + r * 4;
-        float y = this.height * 0.55f + wrap(y0 - t * speed, 0, span * 0.6f);
-        float x = x0 + (float) Math.sin(t * freq + phase) * amp + parallaxX.get() * 0.09f;
-        float breathe = 0.8f + 0.2f * (float) Math.sin(t * 0.4f + phase);
-        int core = ColorUtil.alpha(colNear, (int) (alpha * breathe * dens));
-        if (ColorUtil.alphaI(core) > 0) {
-            GfxEngine.radial(g, x, y, r * 2, core, ColorUtil.alpha(colNear, 0));
+    /**
+     * «AURORA» с межбуквенным разрядом: одна общая тень на строку,
+     * затем буквы с плавным переливом белого → акцент. Шиммер бежит
+     * по буквам медленной волной — марка «живая», но не мигает резко.
+     */
+    private void drawWordmark(GuiGraphics g, String s, float cx, float y, float size,
+                              float spacing, int alpha, float t) {
+        int len = s.length();
+        if (len <= 0) {
+            return;
+        }
+        float[] widths = new float[len];
+        float total = 0;
+        for (int i = 0; i < len; i++) {
+            widths[i] = GfxEngine.textWidth(s.substring(i, i + 1), size, true) + spacing;
+            total += widths[i];
+        }
+        total -= spacing;
+        float x = cx - total / 2f;
+        float baseline = y + size * 0.78f;
+
+        // одна общая тень на всю строку (тень по буквам «слипается»)
+        GfxEngine.drawText(g, x + 1, baseline + 1, s, size,
+                ColorUtil.alpha(0x000000, (int) (alpha * 0.55f)), true);
+
+        int accent = theme.accentNow();
+        int accent2 = theme.accent(1.0f);
+        for (int i = 0; i < len; i++) {
+            String ch = s.substring(i, i + 1);
+            float f = len <= 1 ? 0 : i / (float) (len - 1);
+            float shimmer = 0.5f + 0.5f * (float) Math.sin(t * 1.05f - i * 0.5f);
+            int hue = ColorUtil.lerp(accent, accent2, f);
+            int col = ColorUtil.lerp(ColorUtil.rgb(244, 245, 250), hue, 0.22f + 0.34f * shimmer);
+            GfxEngine.drawText(g, x, baseline, ch, size, ColorUtil.alpha(col, alpha), true);
+            x += widths[i];
         }
     }
 
@@ -480,13 +496,13 @@ public class AuroraTitleScreen extends Screen {
     /*  Кнопки                                                            */
     /* ------------------------------------------------------------------ */
 
-    private void button(GuiGraphics g, int index, int x, int y, int w, int h, float elapsed) {
+    private void button(GuiGraphics g, int index, int x, int y, int w, int h, float elapsed, boolean anim) {
         // каскад: каждая кнопка появляется чуть позже предыдущей
-        float bt = Animation.easeOutCubic(clamp01((elapsed - 0.3f - index * 0.08f) / 0.5f));
+        float bt = anim ? Animation.easeOutCubic(clamp01((elapsed - 0.4f - index * 0.08f) / 0.5f)) : 1f;
         if (bt <= 0.01f) {
             return;
         }
-        float by = y + (1 - bt) * 16;
+        float by = y + (1 - bt) * 14;
 
         Animation hover = hoverAnims[index];
         boolean inside = bt > 0.85f && mouseX >= x && mouseX <= x + w && mouseY >= by && mouseY <= by + h;
@@ -499,37 +515,41 @@ public class AuroraTitleScreen extends Screen {
         // мягкое свечение за кнопкой при наведении
         if (hv > 0.02f) {
             GfxEngine.dropShadow(g, x - 1, by - 1, w + 2, h + 2, h / 2f, 1.5f, 9f,
-                    ColorUtil.alpha(theme.accentNow(), (int) ((primary ? 76 : 58) * hv * bt)));
+                    ColorUtil.alpha(theme.accentNow(), (int) ((primary ? 70 : 52) * hv * bt)));
         }
 
         // масштаб: наведение чуть увеличивает, нажатие — мягко сжимает
-        float sc = (1f + 0.028f * hv) * (1f - 0.035f * press);
+        float sc = (1f + 0.026f * hv) * (1f - 0.035f * press);
         g.pose().pushMatrix();
         g.pose().translate(x + w / 2f, by + h / 2f);
         g.pose().scale(sc, sc);
         g.pose().translate(-(x + w / 2f), -(by + h / 2f));
 
         if (primary) {
-            // primary: фирменный градиент акцента + белая обводка
+            // primary: фирменный градиент акцента на чёрном — главный акцент экрана
             int gradTop = ColorUtil.lerp(theme.accent(0.05f), theme.accent(0.3f), hv);
             int gradBottom = ColorUtil.lerp(theme.accent(0.95f), theme.accent(0.7f), hv);
-            GfxEngine.roundedGradient(g, x, by, w, h, h / 3f,
-                    ColorUtil.alpha(gradTop, (int) (238 * bt)),
-                    ColorUtil.alpha(gradBottom, (int) (238 * bt)));
-            GfxEngine.outline(g, x, by, w, h, h / 3f,
-                    ColorUtil.rgba(255, 255, 255, (int) ((58 + 40 * hv) * bt)), 1f);
-            int textColor = ColorUtil.rgb(255, 255, 255);
+            GfxEngine.roundedGradient(g, x, by, w, h, h / 3.2f,
+                    ColorUtil.alpha(gradTop, (int) (240 * bt)),
+                    ColorUtil.alpha(gradBottom, (int) (240 * bt)));
+            GfxEngine.outline(g, x, by, w, h, h / 3.2f,
+                    ColorUtil.rgba(255, 255, 255, (int) ((52 + 42 * hv) * bt)), 1f);
             RenderUtil.drawCenteredText(g, font, BT[index], x + w / 2f,
                     by + h / 2f - RenderUtil.fontHeight(font) / 2f + 1,
-                    ColorUtil.alpha(textColor, (int) (255 * bt)), theme);
+                    ColorUtil.alpha(ColorUtil.rgb(255, 255, 255), (int) (255 * bt)), theme);
         } else {
-            int fill = ColorUtil.lerp(ColorUtil.rgba(27, 30, 46, 208), ColorUtil.rgba(56, 61, 92, 242), hv);
-            GfxEngine.rounded(g, x, by, w, h, h / 3f,
+            // вторичные: тёмное стекло — глубже ванильных, читается на черноте
+            int fill = ColorUtil.lerp(ColorUtil.rgba(17, 19, 30, 226),
+                    ColorUtil.rgba(33, 37, 56, 240), hv);
+            GfxEngine.rounded(g, x, by, w, h, h / 3.2f,
                     ColorUtil.alpha(fill, (int) (ColorUtil.alphaI(fill) * bt)));
-            int outline = ColorUtil.lerp(ColorUtil.rgba(255, 255, 255, 34),
-                    ColorUtil.alpha(theme.accentNow(), 210), hv);
-            GfxEngine.outline(g, x, by, w, h, h / 3f,
+            int outline = ColorUtil.lerp(ColorUtil.rgba(255, 255, 255, 30),
+                    ColorUtil.alpha(theme.accentNow(), 200), hv);
+            GfxEngine.outline(g, x, by, w, h, h / 3.2f,
                     ColorUtil.alpha(outline, (int) (ColorUtil.alphaI(outline) * bt)), 1f);
+            // тонкая светлая кромка сверху — «стекло»
+            GfxEngine.rounded(g, x + h / 3.2f + 2, by + 1, w - (h / 3.2f + 2) * 2, 1, 0.5f,
+                    ColorUtil.rgba(255, 255, 255, (int) (24 * bt)));
 
             int textColor = ColorUtil.lerp(theme.textSecondary(), ColorUtil.rgb(255, 255, 255), hv);
             RenderUtil.drawCenteredText(g, font, BT[index], x + w / 2f,
@@ -571,11 +591,11 @@ public class AuroraTitleScreen extends Screen {
             float hv = hover.get();
 
             int fill = ColorUtil.lerp(ColorUtil.rgba(255, 255, 255, 10),
-                    ColorUtil.alpha(theme.accentNow(), 76), hv);
+                    ColorUtil.alpha(theme.accentNow(), 72), hv);
             GfxEngine.rounded(g, bx, y, tw, 20, 10,
                     ColorUtil.alpha(fill, (int) (ColorUtil.alphaI(fill) * appearT)));
-            int outline = ColorUtil.lerp(ColorUtil.rgba(255, 255, 255, 16),
-                    ColorUtil.alpha(theme.accentNow(), 130), hv);
+            int outline = ColorUtil.lerp(ColorUtil.rgba(255, 255, 255, 18),
+                    ColorUtil.alpha(theme.accentNow(), 125), hv);
             GfxEngine.outline(g, bx, y, tw, 20, 10,
                     ColorUtil.alpha(outline, (int) (ColorUtil.alphaI(outline) * appearT)), 1f);
             int col = ColorUtil.lerp(theme.textSecondary(), ColorUtil.rgb(255, 255, 255), hv);

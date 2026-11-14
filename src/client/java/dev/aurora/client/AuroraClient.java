@@ -159,7 +159,9 @@ public class AuroraClient implements ClientModInitializer {
                             new LevelSettings("aurora_test", GameType.SURVIVAL, false, Difficulty.NORMAL,
                                     true, new GameRules(FeatureFlags.VANILLA_SET), WorldDataConfiguration.DEFAULT),
                             new WorldOptions(3250963L, true, false),
-                            WorldPresets::createNormalWorldDimensions, null);
+                            // плоский мир: гарантированно открытая местность —
+                            // мобы и ESP видны в кадре без лесных деревьев
+                            WorldPresets::createFlatWorldDimensions, null);
                     LOG.info("Смоук: создаём тестовый мир aurora_test (seed 3250963, чит-коды включены)");
                 } catch (Exception ex) {
                     LOG.error("Смоук: не удалось создать тестовый мир", ex);
@@ -173,11 +175,22 @@ public class AuroraClient implements ClientModInitializer {
                     LOG.info("Смоук: мир загружен, игрок в мире");
                 }
                 worldJoinTicks++;
-                if (!mobsSummoned && worldJoinTicks == 40) {
+                // разворачиваем камеру на юг (yaw 0) и чуть вниз — чтобы призванные
+                // впереди мобы гарантированно попали в кадр (спавн бывает в лесу);
+                // творческий режим — ночная мобовня не убьёт игрока до чат-теста
+                if (!mobsSummoned && worldJoinTicks == 20) {
+                    try {
+                        client.getConnection().sendCommand("gamemode creative @s");
+                        client.getConnection().sendCommand("tp @s ~ ~ ~ 0 6");
+                        LOG.info("Смоук: камера развёрнута на юг (yaw 0, pitch 6), режим творческий");
+                    } catch (Exception ignored) {
+                    }
+                }
+                if (!mobsSummoned && worldJoinTicks == 60) {
                     mobsSummoned = true;
                     try {
-                        client.getConnection().sendCommand("summon minecraft:sheep ~ ~ ~5");
-                        client.getConnection().sendCommand("summon minecraft:pig ~2 ~ ~4");
+                        client.getConnection().sendCommand("summon minecraft:sheep ~ ~ ~6");
+                        client.getConnection().sendCommand("summon minecraft:pig ~2 ~ ~5");
                         client.getConnection().sendCommand("summon minecraft:cow ~-2 ~ ~5");
                         client.getConnection().sendCommand("time set day");
                         LOG.info("Смоук: призваны овца, свинья и корова перед камерой");

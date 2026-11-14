@@ -35,12 +35,13 @@ import java.util.Map;
  * (ванильный {@link GameRenderer#projectPointToScreen(Vec3)} с учётом FOV
  * и зума Aurora), поверх прямоугольника цели NanoVG рисует стиль.
  *
- * <p>Стиль «Круг» (по умолчанию) — фирменная подсветка: моб находится
- * внутри светящегося круга, круг плавно «дышит» вверх-вниз по синусоиде
- * (амплитуда подобрана так, что цель всегда остаётся внутри), свечение
- * размыто несколькими слоями колец и радиальным пятном. Внутри летают
- * две дуги-«кометы» навстречу друг другу, у ног цели — светящееся
- * кольцо-якорь в мировой проекции.</p>
+ * <p>Стиль «Круг» (по умолчанию) — фирменная подсветка: большой мягкий
+ * круг, моб целиком сидит внутри с «воздухом» (радиус от экранной высоты
+ * цели, а не от диагонали рамки). Круг плавно «дышит» и летит вверх-вниз
+ * по синусоиде от абсолютного времени, край — гауссов: три слоя штрихов
+ * всё уже и всё ярче плюс радиальное пятно. Внутри летают две дуги-«кометы»
+ * навстречу друг другу, у ног цели — светящееся кольцо-якорь в мировой
+ * проекции, под кругом — плавная полоска здоровья.</p>
  *
  * <p>Стиль «Призрак» — квадрат-подложка, два вращающихся ромба навстречу
  * друг другу, кольцо вдоль тела цели, светящийся диск под ногами и три
@@ -288,6 +289,17 @@ public class TargetEspModule extends Module {
         if (x1 < 0 || x0 > guiW || y1 < 0 || y0 > guiH) {
             return; // целиком вне экрана
         }
+        // ЦЕЛЬ ЗАПОЛНЯЕТ ЭКРАН — проекция мусорная: сущность вплотную к
+        // камере (овца/свинья под ногами игрока) либо пересекает near-plane.
+        // У такой цели все углы «взрываются» в стороны и ESP рисовал
+        // огромные пустые круги на пол-экрана (замечено на скриншоте).
+        if (bw > guiW * 0.72f || bh > guiH * 0.72f) {
+            return;
+        }
+        // сущность ВПЛОТНУЮ к камере — проекция недостоверна, пропускаем
+        if (e.position().distanceToSqr(camPos) < 1.6) {
+            return;
+        }
 
         Target st = states.get(e.getId());
         float alpha = st != null ? Animation.smooth(Math.max(0f, Math.min(1f, st.alpha.get()))) : 0f;
@@ -311,9 +323,12 @@ public class TargetEspModule extends Module {
     }
 
     /* ------------------------------------------------------------------ */
-    /*  Стиль «Круг»: светящийся круг вокруг цели, плавно летящий          */
-    /*  вверх-вниз, с размытым свечением и дугами-«кометами»              */
+    /*  Стиль «Круг»: большой мягкий круг, моб целиком внутри. Круг        */
+    /*  плавно летит вверх-вниз, край — гауссов (размытые слои штрихов)   */
     /* ------------------------------------------------------------------ */
+
+    /** Геометрия круга для полоски здоровья (центр, низ круга, радиус). */
+    private float healthCx, healthCyBottom, healthR;
 
     private void drawCircleStyle(GuiGraphics g, Entity e, AABB bb, int x, int y, int w, int h,
                                  int accent, int accent2, int A, float t, GameRenderer gr) {
@@ -328,57 +343,67 @@ public class TargetEspModule extends Module {
         float cy = y + h / 2f;
         float halfDiag = (float) Math.sqrt(w * (float) w + h * (float) h) * 0.5f;
 
-        // амплитуда полёта круга: заметная, но цель всегда внутри круга
-        float amp = Math.max(2f, h * 0.15f);
-        float R = Math.max(halfDiag * circleRadius.get(), h * 0.5f + amp + 3f);
-        // кэп: у самой близкой цели круг не должен разрастаться на пол-экрана
-        // и перекрывать HUD-панели (замечено на скриншоте смоук-теста)
-        R = Math.min(R, guiH * 0.42f);
-        // плавный полёт вверх-вниз (чистый синус от абсолютного времени)
-        float bob = (float) Math.sin(t * 1.7f * spd) * amp;
+        // РАДИУС: круг щедрый — моб сидит внутри с «воздухом». Раньше R
+        // прижимался к halfDiag и кольцо обнимало моба, читаясь как овал.
+        // База — высота цели на экране: даже широкий моб остаётся внутри.
+        float baseR = Math.max(h * 0.95f, w * 0.62f);
+        float R = baseR * 1.15f * Math.max(0.9f, circleRadius.get());
+
+        // плавный полёт вверх-вниз (чистый синус абсолютного времени):
+        // амплитуда заметная, но круг никогда не отрывается от цели
+        float amp = Math.max(1.5f, h * 0.16f);
+        amp = Math.max(0f, Math.min(amp, R - halfDiag - 3f));
+        float bob = (float) Math.sin(t * 1.55f * spd) * amp;
         float rcy = cy + bob;
         // лёгкое «дыхание» радиуса — круг живой
-        float breathe = 1f + 0.03f * (float) Math.sin(t * 2.3f * spd);
-        R *= breathe;
+        R *= 1f + 0.02f * (float) Math.sin(t * 2.1f * spd);
 
         // ===== размытое свечение: радиальное пятно + широкие мягкие кольца =====
         if (glow.get()) {
-            GfxEngine.radial(g, cx, rcy, R * 2.8f, ColorUtil.alpha(col, (int) (44 * k)), ColorUtil.alpha(col, 0));
-            GfxEngine.ring(g, cx, rcy, (R + 6.5f) * 2, ColorUtil.alpha(col, (int) (32 * k)), 3.4f);
-            GfxEngine.ring(g, cx, rcy, (R + 3.2f) * 2, ColorUtil.alpha(col, (int) (58 * k)), 2.2f);
+            GfxEngine.radial(g, cx, rcy, R * 2.7f, ColorUtil.alpha(col, (int) (30 * k)), ColorUtil.alpha(col, 0));
+            GfxEngine.ring(g, cx, rcy, (R + 9) * 2, ColorUtil.alpha(col, (int) (22 * k)), 5.5f);
+            GfxEngine.ring(g, cx, rcy, (R + 4.5f) * 2, ColorUtil.alpha(col, (int) (44 * k)), 3.5f);
         }
 
-        // ===== основной круг: «размытый» гауссов ореол — несколько всё более
-        // широких и всё более тусклых штрихов вместо одного резкого контура =====
-        GfxEngine.ring(g, cx, rcy, R * 2, ColorUtil.alpha(col, (int) (48 * k)), 7.5f);
-        GfxEngine.ring(g, cx, rcy, R * 2, ColorUtil.alpha(col, (int) (95 * k)), 4.4f);
-        GfxEngine.ring(g, cx, rcy, R * 2, ColorUtil.alpha(col, (int) (205 * k)), 2.4f);
-        // тонкое внутреннее колечко вторым цветом — глубина
-        GfxEngine.ring(g, cx, rcy, (R - 3.2f) * 2, ColorUtil.alpha(col2, (int) (100 * k)), 0.9f);
+        // ===== основной контур: три слоя всё уже и всё ярче — размытый
+        // гауссов край вместо резкой линии =====
+        GfxEngine.ring(g, cx, rcy, R * 2, ColorUtil.alpha(col, (int) (40 * k)), 8f);
+        GfxEngine.ring(g, cx, rcy, R * 2, ColorUtil.alpha(col, (int) (85 * k)), 4.5f);
+        GfxEngine.ring(g, cx, rcy, R * 2, ColorUtil.alpha(col, (int) (205 * k)), 2.2f);
+        // внутренняя окантовка вторым цветом — объём
+        GfxEngine.ring(g, cx, rcy, (R - 4.5f) * 2, ColorUtil.alpha(col2, (int) (80 * k)), 1f);
+        // едва заметная заливка — внутренность читается как зона
+        GfxEngine.circle(g, cx, rcy, R * 1.8f, ColorUtil.alpha(col, (int) (8 * k)));
 
         // ===== две дуги-«кометы», летящие по кругу навстречу друг другу =====
-        float arcR = Math.max(6f, R - 4.5f);
+        float arcR = Math.max(6f, R - 6f);
         float headA = t * 1.9f * spd;
         float tailA = headA - 2.2f; // ~126°
-        drawArc(g, cx, rcy, arcR, headA, tailA, ColorUtil.alpha(col, (int) (205 * k)), 1.9f);
+        drawArc(g, cx, rcy, arcR, headA, tailA, ColorUtil.alpha(col, (int) (205 * k)), 2f);
         float headB = -t * 1.35f * spd + 2.4f;
         float tailB = headB - 1.45f;
-        drawArc(g, cx, rcy, arcR * 0.99f, headB, tailB, ColorUtil.alpha(col2, (int) (150 * k)), 1.2f);
+        drawArc(g, cx, rcy, arcR * 0.99f, headB, tailB, ColorUtil.alpha(col2, (int) (150 * k)), 1.3f);
         // светящиеся «головки» комет
         GfxEngine.circle(g, cx + (float) Math.cos(headA) * arcR, rcy + (float) Math.sin(headA) * arcR,
-                3.6f, ColorUtil.alpha(col, (int) (220 * k)));
+                4f, ColorUtil.alpha(col, (int) (220 * k)));
         GfxEngine.circle(g, cx + (float) Math.cos(headA) * arcR, rcy + (float) Math.sin(headA) * arcR,
-                1.7f, ColorUtil.rgba(255, 255, 255, (int) (215 * k)));
+                1.8f, ColorUtil.rgba(255, 255, 255, (int) (215 * k)));
         GfxEngine.circle(g, cx + (float) Math.cos(headB) * arcR, rcy + (float) Math.sin(headB) * arcR,
-                2.4f, ColorUtil.alpha(col2, (int) (185 * k)));
+                2.6f, ColorUtil.alpha(col2, (int) (185 * k)));
 
-        // ===== кольцо-якорь у ног цели (мировая проекция) =====
+        // ===== кольцо-якорь у ног цели (мировая проекция): крупная
+        // «подставка», а не мелкая клякса =====
         if (project(gr, e.getX(), bb.minY + 0.03, e.getZ())) {
-            float rx = Math.max(7f, w * 0.40f);
+            float rx = Math.max(w * 0.55f, R * 0.48f);
             float ry = rx * 0.30f;
-            GfxEngine.ellipse(g, projX, projY, rx * 1.4f, ry * 1.4f, ColorUtil.alpha(col, (int) (40 * k)), 2.6f);
-            GfxEngine.ellipse(g, projX, projY, rx, ry, ColorUtil.alpha(col, (int) (150 * k)), 1.1f);
+            GfxEngine.ellipse(g, projX, projY, rx * 1.45f, ry * 1.45f, ColorUtil.alpha(col, (int) (34 * k)), 3f);
+            GfxEngine.ellipse(g, projX, projY, rx, ry, ColorUtil.alpha(col, (int) (140 * k)), 1.2f);
         }
+
+        // запоминаем геометрию для полоски здоровья (под кругом, по центру)
+        healthCx = cx;
+        healthCyBottom = rcy + R;
+        healthR = R;
     }
 
     /**
@@ -525,17 +550,30 @@ public class TargetEspModule extends Module {
         GfxEngine.outline(g, x, y, w, h, 7, ColorUtil.rgba(255, 255, 255, (int) (70 * k)), 1f);
     }
 
-    /** Полоска здоровья: плавно доезжает до нового значения. */
-    private void drawHealth(GuiGraphics g, Target st, LivingEntity le, int x, int y, int w, int yBottom, int accent, int A) {
+    /** Полоска здоровья: плавно доезжает до нового значения.
+     *  В стиле «Круг» рисуется под кругом по центру (следует за полётом);
+     *  в остальных — под рамкой цели. */
+    private void drawHealth(GuiGraphics g, Target st, LivingEntity le, int x, int y, int w, int yBottom,
+                            int accent, int A) {
         float frac = Math.max(0f, Math.min(1f, le.getHealth() / Math.max(1f, le.getMaxHealth())));
         if (st.hp == null) {
             st.hp = new Animation(frac, 10);
         }
         float shown = st.hp.apply(frac);
-        int barW = Math.min(54, Math.max(24, w / 2));
-        int bx = x + (w - barW) / 2;
-        int by = yBottom + 4;
-        GfxEngine.rounded(g, bx, by, barW, 3, 1.5f, ColorUtil.rgba(5, 6, 10, (int) (150 * A / 255f)));
+        boolean circle = "Круг".equals(style.get());
+        int barW = circle
+                ? Math.max(26, Math.min(64, Math.round(healthR * 0.9f)))
+                : Math.min(54, Math.max(24, w / 2));
+        int bx = circle
+                ? Math.round(healthCx - barW / 2f)
+                : x + (w - barW) / 2;
+        int by = circle
+                ? Math.round(healthCyBottom + 6)
+                : yBottom + 4;
+        GfxEngine.rounded(g, bx, by, barW, 3.5f, 1.75f, ColorUtil.rgba(5, 6, 10, (int) (165 * A / 255f)));
+        // мягкое свечение под полоской — читается даже на светлом фоне
+        GfxEngine.rounded(g, bx - 1, by - 1, barW + 2, 5.5f, 2.75f,
+                ColorUtil.rgba(5, 6, 10, (int) (70 * A / 255f)));
         int fillW = Math.max(3, Math.round(barW * shown));
         // цвет: зелёный при полном здоровье -> акцент -> красный на минимуме
         int col;
@@ -544,6 +582,6 @@ public class TargetEspModule extends Module {
         } else {
             col = ColorUtil.lerp(ColorUtil.rgb(248, 113, 113), accent, shown * 2f);
         }
-        GfxEngine.rounded(g, bx, by, fillW, 3, 1.5f, ColorUtil.alpha(col, Math.round(255f * A / 255f)));
+        GfxEngine.rounded(g, bx, by, fillW, 3.5f, 1.75f, ColorUtil.alpha(col, Math.round(255f * A / 255f)));
     }
 }

@@ -187,13 +187,23 @@ public class HudEditorScreen extends Screen {
         int accent = theme.accentNow();
 
         // ===== тонкая сетка: минорные линии почти невидимы, мажорные чуть заметнее =====
-        int minor = ColorUtil.rgba(255, 255, 255, (int) (10 * at));
-        int major = ColorUtil.alpha(accent, (int) (26 * at));
+        int minor = ColorUtil.rgba(255, 255, 255, (int) (7 * at));
+        int major = ColorUtil.alpha(accent, (int) (22 * at));
         for (int x = 0, i = 0; x <= w; x += GRID_CELL, i++) {
             GfxEngine.rounded(g, x, 0, 1, h, 0, i % GRID_MAJOR == 0 ? major : minor);
         }
         for (int y = 0, i = 0; y <= h; y += GRID_CELL, i++) {
             GfxEngine.rounded(g, 0, y, w, 1, 0, i % GRID_MAJOR == 0 ? major : minor);
+        }
+
+        // ===== точки на мажорных пересечениях — «дизайнерская» сетка =====
+        // (как в Figma/Sketch: крестики читаются лучше сплошных линий)
+        int dot = ColorUtil.alpha(accent, (int) (64 * at));
+        int majorStep = GRID_CELL * GRID_MAJOR;
+        for (int gx = 0; gx <= w; gx += majorStep) {
+            for (int gy = 0; gy <= h; gy += majorStep) {
+                GfxEngine.circle(g, gx + 0.5f, gy + 0.5f, 2.4f, dot);
+            }
         }
 
         // ===== центральные оси — акцентные, как в графических редакторах =====
